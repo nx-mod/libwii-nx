@@ -551,6 +551,38 @@ enum ISFSCommand {
     ISFS_IOCTL_SHUTDOWN = 13,
 };
 
+// The NAND's geometry, as Dolphin's Source/Core/Core/IOS/FS/FileSystem.h states
+// it. A title asks how much room a directory takes before it writes a save, and
+// answers invented on the spot let it believe it has no space, or all of it.
+constexpr uint32_t kNandClusterSize = 16384;
+constexpr uint32_t kNandTotalClusters = 0x7ec0;
+constexpr uint32_t kNandReservedClusters = 0x0300;
+constexpr uint32_t kNandUsableClusters = kNandTotalClusters - kNandReservedClusters;
+constexpr uint32_t kNandTotalInodes = 0x17ff;
+
+// Counts a directory the way the console does: every file and directory under it
+// is one inode, and a file occupies whole clusters.
+static void CountNandUsage(const std::filesystem::path& directory,
+                           uint64_t& inodes, uint64_t& clusters) {
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
+        const std::string name = HostPathText(entry.path().filename());
+        if (name.empty() || name.size() > 12) {
+            continue;  // cannot exist on a real NAND; also hides write shadows
+        }
+        ++inodes;
+        std::error_code entryEc;
+        if (entry.is_directory(entryEc)) {
+            CountNandUsage(entry.path(), inodes, clusters);
+            continue;
+        }
+        const auto size = static_cast<uint64_t>(entry.file_size(entryEc));
+        if (!entryEc) {
+            clusters += (size + kNandClusterSize - 1) / kNandClusterSize;
+        }
+    }
+}
+
 extern "C" int32_t NAND_IOS_Ioctl_HLE(
     uint32_t fd,
     uint32_t cmd,
@@ -671,16 +703,26 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
             }
             
             case ISFS_IOCTL_GETSTATS: {
-                // Return filesystem stats (fake values)
-                if (outBufPtr && outLen >= 0x1c) {
-                    Memory::Write32(outBufPtr + 0x00, 0x200000);  // Total blocks
-                    Memory::Write32(outBufPtr + 0x04, 0x100000);  // Free blocks
-                    Memory::Write32(outBufPtr + 0x08, 0);         // Used blocks
-                    Memory::Write32(outBufPtr + 0x0C, 0);         // Bad blocks
-                    Memory::Write32(outBufPtr + 0x10, 0);         // Reserved blocks
-                    Memory::Write32(outBufPtr + 0x14, 0x20);      // Block size
-                    Memory::Write32(outBufPtr + 0x18, 0);         // Free inodes
+                // ISFSNandStats: seven counts, in this order. A title reads
+                // cluster_size from the first of them, so getting the order
+                // wrong tells it the NAND is built of 2 MB blocks.
+                if (!outBufPtr || outLen < 0x1c || !Memory::Contains(outBufPtr, 0x1c)) {
+                    return ISFS_EINVAL;
                 }
+                uint64_t inodes = 0;
+                uint64_t clusters = 0;
+                CountNandUsage(TranslateNandPath("/"), inodes, clusters);
+                const uint32_t usedClusters =
+                    static_cast<uint32_t>(std::min<uint64_t>(clusters, kNandUsableClusters));
+                const uint32_t usedInodes =
+                    static_cast<uint32_t>(std::min<uint64_t>(inodes, kNandTotalInodes));
+                Memory::Write32(outBufPtr + 0x00, kNandClusterSize);
+                Memory::Write32(outBufPtr + 0x04, kNandUsableClusters - usedClusters);
+                Memory::Write32(outBufPtr + 0x08, usedClusters);
+                Memory::Write32(outBufPtr + 0x0C, 0);  // bad clusters
+                Memory::Write32(outBufPtr + 0x10, kNandReservedClusters);
+                Memory::Write32(outBufPtr + 0x14, kNandTotalInodes - usedInodes);
+                Memory::Write32(outBufPtr + 0x18, usedInodes);
                 return ISFS_OK;
             }
             
@@ -689,23 +731,19 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                 return ISFS_OK;
             }
             
-            case ISFS_IOCTL_GETUSAGE: {
-                // Return usage info (fake values)
-                if (outBufPtr && outLen >= 8) {
-                    Memory::Write32(outBufPtr + 0, 100);   // Files
-                    Memory::Write32(outBufPtr + 4, 10000); // Blocks used
-                }
-                return ISFS_OK;
-            }
+            case ISFS_IOCTL_GETUSAGE:
+                // GetUsage is a vectored call - a path in, two counts out - and
+                // is answered in NAND_IOS_Ioctlv_HLE. Reaching it here means the
+                // caller used a shape the console does not, and inventing counts
+                // would have it size a save against numbers we made up.
+                LogNandWarning("IOS_Ioctl", "GETUSAGE is ioctlv, not ioctl");
+                return ISFS_EINVAL;
             
-            case ISFS_IOCTL_READDIR: {
-                // Read directory listing
-                // This is complex - return empty for now
-                if (outBufPtr && outLen >= 4) {
-                    Memory::Write32(outBufPtr, 0); // 0 entries
-                }
-                return ISFS_OK;
-            }
+            case ISFS_IOCTL_READDIR:
+                // Likewise vectored. Answering "zero entries, success" told the
+                // Wii Menu its channel directory was empty.
+                LogNandWarning("IOS_Ioctl", "READDIR is ioctlv, not ioctl");
+                return ISFS_EINVAL;
             
             default:
                 LogNandWarning("IOS_Ioctl", "unknown ISFS cmd=%u", cmd);
@@ -954,6 +992,39 @@ REGISTER_NATIVE_FUNCTION_AS(0x80169BCC, ISFS_OpenLib_HLE_80169BCC, "ISFS_OpenLib
 // IOS_Ioctlv HLE - Vector Ioctl for complex ISFS operations
 // ============================================================================
 
+// ISFS_GetUsage: one path in, two counts out - clusters first, then inodes.
+static int32_t HandleIsfsGetUsage(uint32_t numIn, uint32_t numOut, uint32_t vectorPtr) {
+    if (numIn != 1 || numOut != 2) {
+        LogNandWarning("IOS_Ioctlv", "GETUSAGE unsupported vector shape numIn=%u numOut=%u",
+                numIn, numOut);
+        return ISFS_EINVAL;
+    }
+    const IosVector pathVec = ReadIosVector(vectorPtr, 0);
+    const IosVector clusterOut = ReadIosVector(vectorPtr, 1);
+    const IosVector inodeOut = ReadIosVector(vectorPtr, 2);
+    if (pathVec.size != 64 || clusterOut.size < 4 || inodeOut.size < 4 ||
+        !Memory::Contains(clusterOut.address, 4) || !Memory::Contains(inodeOut.address, 4)) {
+        return ISFS_EINVAL;
+    }
+    const std::string wiiPath = ReadGuestCString(pathVec.address, 64);
+    if (wiiPath.empty()) {
+        return ISFS_EINVAL;
+    }
+    const std::filesystem::path hostPath = TranslateNandPath(wiiPath.c_str());
+    if (!IsDirectory(hostPath)) {
+        return ISFS_ENOENT;
+    }
+
+    uint64_t inodes = 0;
+    uint64_t clusters = 0;
+    CountNandUsage(hostPath, inodes, clusters);
+    Memory::Write32(clusterOut.address,
+                    static_cast<uint32_t>(std::min<uint64_t>(clusters, kNandUsableClusters)));
+    Memory::Write32(inodeOut.address,
+                    static_cast<uint32_t>(std::min<uint64_t>(inodes, kNandTotalInodes)));
+    return ISFS_OK;
+}
+
 static int32_t HandleIsfsReadDir(uint32_t numIn, uint32_t numOut, uint32_t vectorPtr) {
     const bool countOnly = (numIn == 1 && numOut == 1);
     if (!countOnly && !(numIn == 2 && numOut == 2)) {
@@ -1049,7 +1120,14 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
         if (cmd == ISFS_IOCTL_READDIR) {
             return HandleIsfsReadDir(numIn, numOut, vectorPtr);
         }
-        return ISFS_OK;
+        if (cmd == ISFS_IOCTL_GETUSAGE) {
+            return HandleIsfsGetUsage(numIn, numOut, vectorPtr);
+        }
+        // Reporting success for a command nothing was done for is worse than
+        // refusing it: the caller believes the filesystem changed, or reads the
+        // buffer it asked us to fill and finds whatever was already there.
+        LogNandWarning("IOS_Ioctlv", "/dev/fs cmd=%u not implemented", cmd);
+        return ISFS_EINVAL;
     }
 
     if (fd == ES_DEV_FD) {

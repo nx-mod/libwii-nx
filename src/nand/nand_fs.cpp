@@ -314,6 +314,91 @@ static bool ResolveRiivolutionSaveHostPath(const std::string& absoluteWiiPath,
     return true;
 }
 
+// A content that more than one title carries is stored once, in /shared1, and
+// the title's own content directory does not hold it. What ties the two together
+// is the TMD: a content whose type has 0x8000 set is shared, and its SHA-1 names
+// the file through /shared1/content.map, whose entries are eight characters of
+// name followed by that hash.
+//
+// WiiWare and Virtual Console titles keep most of themselves this way - Mega Man
+// 9 has five of its eleven contents in /shared1 - so without this they find half
+// their data missing and nothing says why.
+static bool ResolveSharedContentPath(const std::string& wiiPath,
+                                     std::filesystem::path& resolved) {
+    // /title/<8>/<8>/content/<8>.app, and nothing else.
+    static constexpr size_t kEntry = 28;
+    // /title/ 7 + high 8 + / 1 + low 8 + /content/ 9 + id 8 + .app 4 = 45.
+    if (wiiPath.size() != 45 || wiiPath.compare(0, 7, "/title/") != 0 ||
+        wiiPath.compare(24, 9, "/content/") != 0 ||
+        wiiPath.compare(41, 4, ".app") != 0) {
+        return false;
+    }
+    const std::string titleHigh = wiiPath.substr(7, 8);
+    const std::string titleLow = wiiPath.substr(16, 8);
+    uint32_t contentId = 0;
+    try {
+        contentId = static_cast<uint32_t>(std::stoul(wiiPath.substr(33, 8), nullptr, 16));
+    } catch (const std::exception&) {
+        return false;
+    }
+
+    const std::filesystem::path tmdPath =
+        BuildHostNandPath("/title/" + titleHigh + "/" + titleLow + "/content/title.tmd");
+    std::ifstream tmdFile(tmdPath, std::ios::binary);
+    if (!tmdFile) {
+        return false;
+    }
+    const std::vector<uint8_t> tmd((std::istreambuf_iterator<char>(tmdFile)),
+                                   std::istreambuf_iterator<char>());
+    // The signed TMD's content table: a count at 0x1DE, then 36 bytes each -
+    // id, index, type, size, and a 20 byte hash.
+    if (tmd.size() < 0x1E4) {
+        return false;
+    }
+    const auto be16 = [&tmd](size_t at) {
+        return static_cast<uint16_t>((tmd[at] << 8) | tmd[at + 1]);
+    };
+    const auto be32 = [&tmd](size_t at) {
+        return (static_cast<uint32_t>(tmd[at]) << 24) | (static_cast<uint32_t>(tmd[at + 1]) << 16) |
+               (static_cast<uint32_t>(tmd[at + 2]) << 8) | static_cast<uint32_t>(tmd[at + 3]);
+    };
+    const size_t count = be16(0x1DE);
+    if (tmd.size() < 0x1E4 + count * 36) {
+        return false;
+    }
+    const uint8_t* hash = nullptr;
+    for (size_t i = 0; i < count; ++i) {
+        const size_t at = 0x1E4 + i * 36;
+        if (be32(at) != contentId) {
+            continue;
+        }
+        if ((be16(at + 6) & 0x8000u) == 0) {
+            return false;  // this title keeps it itself
+        }
+        hash = tmd.data() + at + 16;
+        break;
+    }
+    if (hash == nullptr) {
+        return false;
+    }
+
+    std::ifstream mapFile(BuildHostNandPath("/shared1/content.map"), std::ios::binary);
+    if (!mapFile) {
+        return false;
+    }
+    const std::vector<uint8_t> map((std::istreambuf_iterator<char>(mapFile)),
+                                   std::istreambuf_iterator<char>());
+    for (size_t at = 0; at + kEntry <= map.size(); at += kEntry) {
+        if (std::memcmp(map.data() + at + 8, hash, 20) != 0) {
+            continue;
+        }
+        const std::string name(reinterpret_cast<const char*>(map.data() + at), 8);
+        resolved = BuildHostNandPath("/shared1/" + name + ".app");
+        return std::filesystem::exists(resolved);
+    }
+    return false;
+}
+
 std::filesystem::path TranslateNandPath(const char* wiiPath) {
     std::string wiiPathStr = NormalizeAbsoluteWiiPath(wiiPath);
     if (wiiPathStr.empty()) {
@@ -325,7 +410,17 @@ std::filesystem::path TranslateNandPath(const char* wiiPath) {
         return redirectedHostPath;
     }
 
-    return BuildHostNandPath(wiiPathStr);
+    const std::filesystem::path hostPath = BuildHostNandPath(wiiPathStr);
+    // Only when the title's own directory does not hold it: a content that is
+    // there is the one to use, and a create must land where it was asked for.
+    std::error_code ec;
+    if (!std::filesystem::exists(hostPath, ec)) {
+        std::filesystem::path shared;
+        if (ResolveSharedContentPath(wiiPathStr, shared)) {
+            return shared;
+        }
+    }
+    return hostPath;
 }
 
 // ============================================================================
