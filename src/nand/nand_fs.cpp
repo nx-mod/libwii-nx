@@ -425,6 +425,28 @@ bool NandPathIsValid(const std::string& wiiPath) {
 // What a directory entry can be called: twelve characters, and no separator.
 // This is the question asked when something is created, not when a path is
 // merely being resolved.
+// Whether the NAND could take this many more bytes. A console refuses a write
+// that would not fit rather than growing, and a title that is never refused
+// writes until the host disk complains instead - a failure it has no error code
+// for and no reason to expect.
+bool NandHasRoomFor(uint64_t bytes) {
+    constexpr uint64_t kClusterBytes = 16384;
+    constexpr uint64_t kUsableClusters = 0x7ec0 - 0x300;
+    std::error_code ec;
+    uint64_t used = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(
+             RuntimeNandPath::ResolveNandRootPath(), ec)) {
+        if (ec) break;
+        std::error_code entryEc;
+        if (entry.is_regular_file(entryEc)) {
+            const uint64_t size = static_cast<uint64_t>(entry.file_size(entryEc));
+            if (!entryEc) used += (size + kClusterBytes - 1) / kClusterBytes;
+        }
+    }
+    const uint64_t wanted = (bytes + kClusterBytes - 1) / kClusterBytes;
+    return used + wanted <= kUsableClusters;
+}
+
 // The last component of a path, which is the name being created.
 std::string NandPathBasename(const std::string& wiiPath) {
     const size_t at = wiiPath.rfind('/');

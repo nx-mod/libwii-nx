@@ -145,6 +145,11 @@ inline constexpr size_t kNandMaxPathDepth = 8;
 // handle rather than opening another.
 inline constexpr size_t kNandMaxOpenFiles = 16;
 
+// Whether this many more bytes would fit. A console refuses a write it cannot
+// store; growing past the NAND's size means a title meets a host disk error it
+// has no code for.
+bool NandHasRoomFor(std::uint64_t bytes);
+
 // Create the directory that contains `path`. False when `path` has no directory
 // component, i.e. there was nothing to create.
 bool CreateParentDirectories(const std::filesystem::path& path);
@@ -212,21 +217,36 @@ enum NANDOpenFlag {
     NAND_OPEN_FLAG_SAFE_CLOSED_ASYNC = 6,  // NANDSafeCloseAsync
 };
 
-// ISFS error codes (IOS filesystem)
+// ISFS error codes. IOS numbers these by position: the filesystem's results are
+// listed in one order and the code is -(position + 100), which Dolphin's
+// ConvertResult states outright. Deriving them rather than naming them by feel
+// matters - the values from -107 down were each one place out here, so a title
+// asking whether a directory was empty would have been told there were no free
+// handles. None of the wrong ones were in use, which is why nothing had noticed.
 enum ISFSResult {
-    ISFS_OK = 0,
-    ISFS_EINVAL = -101,      // Invalid argument
-    ISFS_EACCESS = -102,     // Permission denied
-    ISFS_ECORRUPT = -103,    // Data corrupted
-    ISFS_EEXIST = -105,      // File exists
-    ISFS_ENOENT = -106,      // No such file/directory
-    ISFS_ENOMEM = -107,      // Out of memory
-    ISFS_EFULL = -108,       // Filesystem full
-    ISFS_ENOTEMPTY = -109,   // Directory not empty
-    ISFS_EBUSY = -110,       // Resource busy
-    ISFS_ENOENT2 = -4,       // Alternative no such file
-    ISFS_EIO = -114,         // I/O error
-    ISFS_MAXFD = -22,        // Max file descriptors
+    ISFS_OK = 0,                        //  0  Success
+    ISFS_EINVAL = -101,                 //  1  Invalid
+    ISFS_EACCESS = -102,                //  2  AccessDenied
+    ISFS_ESUPERBLOCKWRITE = -103,       //  3  SuperblockWriteFailed
+    ISFS_ESUPERBLOCKINIT = -104,        //  4  SuperblockInitFailed
+    ISFS_EEXIST = -105,                 //  5  AlreadyExists
+    ISFS_ENOENT = -106,                 //  6  NotFound
+    ISFS_EFSTFULL = -107,               //  7  FstFull
+    ISFS_ENOSPC = -108,                 //  8  NoFreeSpace
+    ISFS_ENOFREEHANDLE = -109,          //  9  NoFreeHandle
+    ISFS_ETOOMANYPATHCOMPONENTS = -110, // 10  TooManyPathComponents
+    ISFS_EINUSE = -111,                 // 11  InUse
+    ISFS_EBADBLOCK = -112,              // 12  BadBlock
+    ISFS_EECC = -113,                   // 13  EccError
+    ISFS_EECCCRIT = -114,               // 14  CriticalEccError
+    ISFS_ENOTEMPTY = -115,              // 15  FileNotEmpty
+    ISFS_ECHECKFAILED = -116,           // 16  CheckFailed
+    ISFS_EUNKNOWN = -117,               // 17  UnknownError
+    ISFS_ESHORTREAD = -118,             // 18  ShortRead
+
+    // Kept because code here uses them: EIO was our own name for a critical ECC
+    // error, which is the closest thing IOS has to "the device failed".
+    ISFS_EIO = ISFS_EECCCRIT,
 };
 
 // ============================================================================

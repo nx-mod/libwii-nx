@@ -65,6 +65,7 @@ static constexpr uint32_t ES_IOCTL_GETTITLECNT = 0x0E;
 static constexpr uint32_t ES_IOCTL_GETTITLES = 0x0F;
 static constexpr uint32_t ES_IOCTL_GETTITLECONTENTSCNT = 0x10;
 static constexpr uint32_t ES_IOCTL_GETTITLECONTENTS = 0x11;
+static constexpr uint32_t ES_IOCTL_GETTITLEDIR = 0x1D;
 static constexpr uint32_t ES_IOCTL_GETDEVICECERT = 0x1E;
 static constexpr uint32_t ES_IOCTL_GETTITLEID = 0x20;
 static constexpr uint32_t ES_IOCTL_SIGN = 0x30;
@@ -591,6 +592,11 @@ extern "C" int32_t NAND_IOS_Write_HLE(uint32_t fd, uint32_t bufferPtr, uint32_t 
     if (!buffer) {
         LogNandError("IOS_Write", "invalid buffer ptr 0x%08X", bufferPtr);
         return ISFS_EINVAL;
+    }
+
+    if (!NandHasRoomFor(length)) {
+        LogNandWarning("IOS_Write", "refusing %u byte(s): the NAND is full", length);
+        return ISFS_ENOSPC;
     }
     
     size_t bytesWritten = std::fwrite(buffer, 1, length, handle->file);
@@ -1404,6 +1410,36 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
                 }
                 for (uint32_t i = 0; i < count; ++i) {
                     Memory::Write32(out.address + i * 4, contents[i]);
+                }
+                return ISFS_OK;
+            }
+
+            // Where a title keeps its saves. A title id in, the path out - and
+            // the directory is created if it is not there, because a channel
+            // that is told where to save then tries to, and a console has the
+            // directory already from when the title was installed.
+            case ES_IOCTL_GETTITLEDIR: {
+                if (numIn != 1 || numOut != 1) {
+                    return ISFS_EINVAL;
+                }
+                const IosVector in = ReadIosVector(vectorPtr, 0);
+                const IosVector out = ReadIosVector(vectorPtr, 1);
+                if (in.size < 8 || !Memory::Contains(in.address, 8)) {
+                    return ISFS_EINVAL;
+                }
+                const uint32_t high = Memory::Read32(in.address);
+                const uint32_t low = Memory::Read32(in.address + 4);
+                char wiiPath[40];
+                const int written = std::snprintf(wiiPath, sizeof(wiiPath),
+                                                  "/title/%08x/%08x/data", high, low);
+                if (written <= 0 || out.size < static_cast<uint32_t>(written) + 1u) {
+                    return ISFS_EINVAL;
+                }
+                CreateDirectoryPath(TranslateNandPath(wiiPath));
+                if (!WriteGuestBytes(out.address, out.size,
+                                     reinterpret_cast<const uint8_t*>(wiiPath),
+                                     static_cast<size_t>(written) + 1u)) {
+                    return ISFS_EINVAL;
                 }
                 return ISFS_OK;
             }
