@@ -774,16 +774,13 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                 for (uint32_t i = 0; i < 0x4a; ++i) {
                     Memory::Write8(outBufPtr + i, 0);
                 }
-                Memory::Write32(outBufPtr + 0x00, 0);  // uid: everything is ours
-                Memory::Write16(outBufPtr + 0x04, 0);  // gid
-                constexpr uint8_t kModeReadWrite = 3;  // None 0, Read 1, Write 2, ReadWrite 3
-                Memory::Write8(outBufPtr + 0x46, kModeReadWrite);  // owner
-                Memory::Write8(outBufPtr + 0x47, kModeReadWrite);  // group
-                Memory::Write8(outBufPtr + 0x48, kModeReadWrite);  // other
-                Memory::Write8(outBufPtr + 0x49, 0);               // attribute
-                NAND_APPROXIMATION("ISFS_GetAttr",
-                                   "everything is owned by uid 0 and readable and writable by "
-                                   "all; we keep no per-file ownership");
+                const NandMetadata meta = NandGetMetadata(wiiPath);
+                Memory::Write32(outBufPtr + 0x00, meta.uid);
+                Memory::Write16(outBufPtr + 0x04, meta.gid);
+                Memory::Write8(outBufPtr + 0x46, meta.ownerMode);
+                Memory::Write8(outBufPtr + 0x47, meta.groupMode);
+                Memory::Write8(outBufPtr + 0x48, meta.otherMode);
+                Memory::Write8(outBufPtr + 0x49, meta.attribute);
                 return ISFS_OK;
             }
             
@@ -875,9 +872,21 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                 if (!inBufPtr || inLen < 0x4a || !Memory::Contains(inBufPtr, 0x4a)) {
                     return ISFS_EINVAL;
                 }
-                NAND_APPROXIMATION("ISFS_SetAttr",
-                                   "accepted and discarded; we keep no per-file ownership or "
-                                   "permissions for GetAttr to return");
+                const std::string wiiPath = ReadGuestCString(inBufPtr + 6, 64);
+                if (!NandPathIsValid(wiiPath)) {
+                    return ISFS_EINVAL;
+                }
+                if (!PathExists(TranslateNandPath(wiiPath.c_str()))) {
+                    return ISFS_ENOENT;
+                }
+                NandMetadata meta{};
+                meta.uid = Memory::Read32(inBufPtr + 0x00);
+                meta.gid = Memory::Read16(inBufPtr + 0x04);
+                meta.ownerMode = Memory::Read8(inBufPtr + 0x46);
+                meta.groupMode = Memory::Read8(inBufPtr + 0x47);
+                meta.otherMode = Memory::Read8(inBufPtr + 0x48);
+                meta.attribute = Memory::Read8(inBufPtr + 0x49);
+                NandSetMetadata(wiiPath, meta);
                 return ISFS_OK;
             }
             

@@ -150,6 +150,20 @@ inline constexpr size_t kNandMaxOpenFiles = 16;
 // has no code for.
 bool NandHasRoomFor(std::uint64_t bytes);
 
+// What a NAND entry is owned by and who may touch it. A host filesystem has
+// nowhere to keep these, so they are kept beside it - see nand_fs.cpp.
+struct NandMetadata {
+    std::uint32_t uid;
+    std::uint16_t gid;
+    std::uint8_t attribute;
+    std::uint8_t ownerMode;   // 0 none, 1 read, 2 write, 3 both
+    std::uint8_t groupMode;
+    std::uint8_t otherMode;
+};
+
+NandMetadata NandGetMetadata(const std::string& wiiPath);
+void NandSetMetadata(const std::string& wiiPath, const NandMetadata& meta);
+
 // Create the directory that contains `path`. False when `path` has no directory
 // component, i.e. there was nothing to create.
 bool CreateParentDirectories(const std::filesystem::path& path);

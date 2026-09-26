@@ -15,6 +15,7 @@
       the host disk answer instead
 
 Next:
-- [ ] Per-file ownership and permissions, so `GetAttr` reports what `SetAttr`
-      was given rather than the same answer for everything
+- [x] Per-file ownership and permissions, so `GetAttr` reports what `SetAttr`
+      was given: kept in `.wiinx_metadata` beside the NAND, since a host
+      filesystem has nowhere for a Wii uid, gid or its three modes
 - [ ] `ES_Launch`, which is how the System Menu starts a channel

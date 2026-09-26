@@ -425,6 +425,134 @@ bool NandPathIsValid(const std::string& wiiPath) {
 // What a directory entry can be called: twelve characters, and no separator.
 // This is the question asked when something is created, not when a path is
 // merely being resolved.
+// Per-file ownership and permissions.
+//
+// A host filesystem cannot hold a Wii uid, gid or its three modes, so they go in
+// a file of our own beside the NAND - the same reason Dolphin keeps an FST
+// sidecar. Ours is a flat list rather than a tree: one line per path, tab
+// separated, because it is small, and because a format you can read with `cat`
+// is one you can check when a title complains about a save it wrote itself.
+//
+// The name is dotted so it cannot be mistaken for something a console put there,
+// and it is never reported by ReadDir, which drops names over twelve characters.
+namespace {
+
+constexpr const char* kMetadataFileName = ".wiinx_metadata";
+
+struct NandMetadataStore {
+    std::map<std::string, NandMetadata> byPath;
+    bool loaded = false;
+    bool dirty = false;
+};
+
+NandMetadataStore g_metadata;
+std::mutex g_metadataMutex;
+
+std::filesystem::path MetadataFilePath() {
+    return RuntimeNandPath::ResolveNandRootPath() / kMetadataFileName;
+}
+
+void LoadMetadataLocked() {
+    if (g_metadata.loaded) {
+        return;
+    }
+    g_metadata.loaded = true;
+    std::ifstream file(MetadataFilePath());
+    if (!file) {
+        return;
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        // path \t uid \t gid \t attribute \t owner \t group \t other
+        std::vector<std::string> fields;
+        size_t at = 0;
+        while (fields.size() < 7) {
+            const size_t tab = line.find('\t', at);
+            fields.push_back(line.substr(at, tab == std::string::npos ? std::string::npos
+                                                                      : tab - at));
+            if (tab == std::string::npos) break;
+            at = tab + 1;
+        }
+        if (fields.size() != 7 || fields[0].empty()) {
+            continue;  // a line we did not write, or a truncated one
+        }
+        try {
+            NandMetadata meta{};
+            meta.uid = static_cast<uint32_t>(std::stoul(fields[1]));
+            meta.gid = static_cast<uint16_t>(std::stoul(fields[2]));
+            meta.attribute = static_cast<uint8_t>(std::stoul(fields[3]));
+            meta.ownerMode = static_cast<uint8_t>(std::stoul(fields[4]));
+            meta.groupMode = static_cast<uint8_t>(std::stoul(fields[5]));
+            meta.otherMode = static_cast<uint8_t>(std::stoul(fields[6]));
+            g_metadata.byPath[fields[0]] = meta;
+        } catch (const std::exception&) {
+            // not ours; skip the line rather than lose the rest of the file
+        }
+    }
+}
+
+// Written to a temp file and renamed, so an interrupted save leaves the previous
+// list intact rather than half of a new one.
+void SaveMetadataLocked() {
+    if (!g_metadata.dirty) {
+        return;
+    }
+    const std::filesystem::path finalPath = MetadataFilePath();
+    const std::filesystem::path tempPath = finalPath.string() + ".tmp";
+    {
+        std::ofstream file(tempPath, std::ios::trunc);
+        if (!file) {
+            LogNandWarning("metadata", "could not write '%s'",
+                           HostPathText(tempPath).c_str());
+            return;
+        }
+        for (const auto& [path, meta] : g_metadata.byPath) {
+            file << path << '\t' << meta.uid << '\t' << meta.gid << '\t'
+                 << static_cast<unsigned>(meta.attribute) << '\t'
+                 << static_cast<unsigned>(meta.ownerMode) << '\t'
+                 << static_cast<unsigned>(meta.groupMode) << '\t'
+                 << static_cast<unsigned>(meta.otherMode) << '\n';
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(tempPath, finalPath, ec);
+    if (ec) {
+        LogNandWarning("metadata", "could not replace '%s'", HostPathText(finalPath).c_str());
+        std::filesystem::remove(tempPath, ec);
+        return;
+    }
+    g_metadata.dirty = false;
+}
+
+}  // namespace
+
+// What was last set for this path, or the default: owned by uid 0 and readable
+// and writable by everyone, which is what a NAND we manage ourselves amounts to.
+NandMetadata NandGetMetadata(const std::string& wiiPath) {
+    std::lock_guard<std::mutex> lock(g_metadataMutex);
+    LoadMetadataLocked();
+    const auto it = g_metadata.byPath.find(wiiPath);
+    if (it != g_metadata.byPath.end()) {
+        return it->second;
+    }
+    NandMetadata meta{};
+    meta.uid = 0;
+    meta.gid = 0;
+    meta.attribute = 0;
+    meta.ownerMode = 3;  // ReadWrite
+    meta.groupMode = 3;
+    meta.otherMode = 3;
+    return meta;
+}
+
+void NandSetMetadata(const std::string& wiiPath, const NandMetadata& meta) {
+    std::lock_guard<std::mutex> lock(g_metadataMutex);
+    LoadMetadataLocked();
+    g_metadata.byPath[wiiPath] = meta;
+    g_metadata.dirty = true;
+    SaveMetadataLocked();
+}
+
 // Whether the NAND could take this many more bytes. A console refuses a write
 // that would not fit rather than growing, and a title that is never refused
 // writes until the host disk complains instead - a failure it has no error code
