@@ -63,6 +63,8 @@ static constexpr int32_t DOLPHIN_DEV_FD = 4;
 static constexpr uint32_t ES_IOCTL_GETDEVICEID = 0x07;
 static constexpr uint32_t ES_IOCTL_GETTITLECNT = 0x0E;
 static constexpr uint32_t ES_IOCTL_GETTITLES = 0x0F;
+static constexpr uint32_t ES_IOCTL_GETTITLECONTENTSCNT = 0x10;
+static constexpr uint32_t ES_IOCTL_GETTITLECONTENTS = 0x11;
 static constexpr uint32_t ES_IOCTL_GETDEVICECERT = 0x1E;
 static constexpr uint32_t ES_IOCTL_GETTITLEID = 0x20;
 static constexpr uint32_t ES_IOCTL_SIGN = 0x30;
@@ -115,6 +117,49 @@ static IosVector ReadIosVector(uint32_t vectorPtr, uint32_t index) {
 // makes a title installed rather than merely present. Sorted, so two calls in a
 // row agree - a caller asks for the count and then for the list, and would be
 // entitled to a different answer otherwise.
+// Which of a title's contents are actually here. The TMD lists what the title
+// is made of; a content counts as stored when its file can be opened, which for
+// a shared one means through /shared1 - TranslateNandPath already resolves that,
+// so the same question answers both kinds.
+static std::vector<uint32_t> StoredContents(uint64_t titleId) {
+    std::vector<uint32_t> contents;
+    char tmdPath[64];
+    std::snprintf(tmdPath, sizeof(tmdPath), "/title/%08x/%08x/content/title.tmd",
+                  static_cast<uint32_t>(titleId >> 32), static_cast<uint32_t>(titleId));
+    std::ifstream tmdFile(TranslateNandPath(tmdPath), std::ios::binary);
+    if (!tmdFile) {
+        return contents;
+    }
+    const std::vector<uint8_t> tmd((std::istreambuf_iterator<char>(tmdFile)),
+                                   std::istreambuf_iterator<char>());
+    if (tmd.size() < 0x1E4) {
+        return contents;
+    }
+    const auto be16 = [&tmd](size_t at) {
+        return static_cast<uint16_t>((tmd[at] << 8) | tmd[at + 1]);
+    };
+    const auto be32 = [&tmd](size_t at) {
+        return (static_cast<uint32_t>(tmd[at]) << 24) | (static_cast<uint32_t>(tmd[at + 1]) << 16) |
+               (static_cast<uint32_t>(tmd[at + 2]) << 8) | static_cast<uint32_t>(tmd[at + 3]);
+    };
+    const size_t count = be16(0x1DE);
+    if (tmd.size() < 0x1E4 + count * 36) {
+        return contents;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const uint32_t contentId = be32(0x1E4 + i * 36);
+        char appPath[64];
+        std::snprintf(appPath, sizeof(appPath), "/title/%08x/%08x/content/%08x.app",
+                      static_cast<uint32_t>(titleId >> 32), static_cast<uint32_t>(titleId),
+                      contentId);
+        std::error_code ec;
+        if (std::filesystem::exists(TranslateNandPath(appPath), ec)) {
+            contents.push_back(contentId);
+        }
+    }
+    return contents;
+}
+
 static std::vector<uint64_t> InstalledTitles() {
     std::vector<uint64_t> titles;
     std::error_code ec;
@@ -1312,6 +1357,53 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
                     Memory::Write32(out.address + i * 8, static_cast<uint32_t>(titles[i] >> 32));
                     Memory::Write32(out.address + i * 8 + 4,
                                     static_cast<uint32_t>(titles[i] & 0xFFFFFFFFu));
+                }
+                return ISFS_OK;
+            }
+
+            // How many of a title's contents are here. A title id in, a count out.
+            case ES_IOCTL_GETTITLECONTENTSCNT: {
+                if (numIn != 1 || numOut != 1) {
+                    return ISFS_EINVAL;
+                }
+                const IosVector in = ReadIosVector(vectorPtr, 0);
+                const IosVector out = ReadIosVector(vectorPtr, 1);
+                if (in.size < 8 || !Memory::Contains(in.address, 8) ||
+                    out.size != 4 || !Memory::Contains(out.address, 4)) {
+                    return ISFS_EINVAL;
+                }
+                const uint64_t titleId = (static_cast<uint64_t>(Memory::Read32(in.address)) << 32) |
+                                         Memory::Read32(in.address + 4);
+                const auto contents = StoredContents(titleId);
+                Memory::Write32(out.address, static_cast<uint32_t>(contents.size()));
+                return ISFS_OK;
+            }
+
+            // Their ids: the title in the first vector, how many were asked for
+            // in the second, and that many four-byte ids out.
+            case ES_IOCTL_GETTITLECONTENTS: {
+                if (numIn != 2 || numOut != 1) {
+                    return ISFS_EINVAL;
+                }
+                const IosVector idIn = ReadIosVector(vectorPtr, 0);
+                const IosVector countIn = ReadIosVector(vectorPtr, 1);
+                const IosVector out = ReadIosVector(vectorPtr, 2);
+                if (idIn.size < 8 || !Memory::Contains(idIn.address, 8) ||
+                    countIn.size < 4 || !Memory::Contains(countIn.address, 4)) {
+                    return ISFS_EINVAL;
+                }
+                const uint64_t titleId =
+                    (static_cast<uint64_t>(Memory::Read32(idIn.address)) << 32) |
+                    Memory::Read32(idIn.address + 4);
+                const uint32_t wanted = Memory::Read32(countIn.address);
+                const auto contents = StoredContents(titleId);
+                const uint32_t count =
+                    static_cast<uint32_t>(std::min<size_t>(wanted, contents.size()));
+                if (!Memory::Contains(out.address, static_cast<size_t>(count) * 4u)) {
+                    return ISFS_EINVAL;
+                }
+                for (uint32_t i = 0; i < count; ++i) {
+                    Memory::Write32(out.address + i * 4, contents[i]);
                 }
                 return ISFS_OK;
             }
