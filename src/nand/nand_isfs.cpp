@@ -61,6 +61,8 @@ static constexpr int32_t ISFS_DEV_FD = 1;
 static constexpr int32_t ES_DEV_FD = 3;
 static constexpr int32_t DOLPHIN_DEV_FD = 4;
 static constexpr uint32_t ES_IOCTL_GETDEVICEID = 0x07;
+static constexpr uint32_t ES_IOCTL_GETTITLECNT = 0x0E;
+static constexpr uint32_t ES_IOCTL_GETTITLES = 0x0F;
 static constexpr uint32_t ES_IOCTL_GETDEVICECERT = 0x1E;
 static constexpr uint32_t ES_IOCTL_GETTITLEID = 0x20;
 static constexpr uint32_t ES_IOCTL_SIGN = 0x30;
@@ -106,6 +108,43 @@ using RuntimeHle::ReadIoVector;
 
 static IosVector ReadIosVector(uint32_t vectorPtr, uint32_t index) {
     return ReadIoVector(vectorPtr, index);
+}
+
+// Every title the NAND holds, as a console would enumerate them: a directory
+// under /title/<high>/<low> counts when it has a TMD, because that is what
+// makes a title installed rather than merely present. Sorted, so two calls in a
+// row agree - a caller asks for the count and then for the list, and would be
+// entitled to a different answer otherwise.
+static std::vector<uint64_t> InstalledTitles() {
+    std::vector<uint64_t> titles;
+    std::error_code ec;
+    const std::filesystem::path titleRoot = TranslateNandPath("/title");
+    for (const auto& high : std::filesystem::directory_iterator(titleRoot, ec)) {
+        if (ec) break;
+        std::error_code highEc;
+        if (!high.is_directory(highEc)) continue;
+        const std::string highName = HostPathText(high.path().filename());
+        if (highName.size() != 8) continue;
+        for (const auto& low : std::filesystem::directory_iterator(high.path(), highEc)) {
+            if (highEc) break;
+            std::error_code lowEc;
+            if (!low.is_directory(lowEc)) continue;
+            const std::string lowName = HostPathText(low.path().filename());
+            if (lowName.size() != 8) continue;
+            if (!std::filesystem::exists(low.path() / "content" / "title.tmd", lowEc)) {
+                continue;
+            }
+            try {
+                const uint64_t id = (std::stoull(highName, nullptr, 16) << 32) |
+                                    std::stoull(lowName, nullptr, 16);
+                titles.push_back(id);
+            } catch (const std::exception&) {
+                // not a title id; a stray directory
+            }
+        }
+    }
+    std::sort(titles.begin(), titles.end());
+    return titles;
 }
 
 static uint64_t CurrentMkwTitleId() {
@@ -1233,6 +1272,47 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
                 }
                 const WiiEsCrypto::Identity& identity = WiiEsCrypto::CurrentIdentity();
                 Memory::Write32(out.address, identity.deviceId);
+                return ISFS_OK;
+            }
+
+            // How many titles are installed. One out vector of four bytes.
+            case ES_IOCTL_GETTITLECNT: {
+                if (numIn != 0 || numOut != 1) {
+                    return ISFS_EINVAL;
+                }
+                const IosVector out = ReadIosVector(vectorPtr, 0);
+                if (out.size != 4 || !Memory::Contains(out.address, 4)) {
+                    return ISFS_EINVAL;
+                }
+                const auto titles = InstalledTitles();
+                Memory::Write32(out.address, static_cast<uint32_t>(titles.size()));
+                LogNandWarning("ES_GetTitleCount", "%zu title(s) in the NAND", titles.size());
+                return ISFS_OK;
+            }
+
+            // The ids themselves: how many were asked for comes in, and that
+            // many - or as many as there are - go out, eight bytes each.
+            case ES_IOCTL_GETTITLES: {
+                if (numIn != 1 || numOut != 1) {
+                    return ISFS_EINVAL;
+                }
+                const IosVector in = ReadIosVector(vectorPtr, 0);
+                const IosVector out = ReadIosVector(vectorPtr, 1);
+                if (in.size < 4 || !Memory::Contains(in.address, 4)) {
+                    return ISFS_EINVAL;
+                }
+                const uint32_t wanted = Memory::Read32(in.address);
+                const auto titles = InstalledTitles();
+                const uint32_t count =
+                    static_cast<uint32_t>(std::min<size_t>(wanted, titles.size()));
+                if (!Memory::Contains(out.address, static_cast<size_t>(count) * 8u)) {
+                    return ISFS_EINVAL;
+                }
+                for (uint32_t i = 0; i < count; ++i) {
+                    Memory::Write32(out.address + i * 8, static_cast<uint32_t>(titles[i] >> 32));
+                    Memory::Write32(out.address + i * 8 + 4,
+                                    static_cast<uint32_t>(titles[i] & 0xFFFFFFFFu));
+                }
                 return ISFS_OK;
             }
 
