@@ -87,6 +87,9 @@ const std::uint8_t* Image()
         // booting what was asked for.
         sram[kFlags] = kFlagReserved | kFlagOobeDone | kFlagStereo;  // 0x2C
         WriteCheckSum(sram);
+        // Not this console's SRAM: a plausible one. If a game ever behaves as
+        // though the screen is offset or the clock is wrong, this is the line
+        // that admits why.
         return true;
     }();
     (void)built;

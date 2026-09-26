@@ -438,6 +438,10 @@ extern "C" int32_t NANDSafeOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint
         }
 
         const int32_t fd = AllocateFd(hostPath, file, static_cast<int32_t>(mode));
+        if (fd < 0) {
+            std::fclose(file);
+            return fd;  // no free handle; nothing is written to fileInfo
+        }
         Memory::Write32(fileInfoPtr, static_cast<uint32_t>(fd));
         Memory::Write8(fileInfoPtr + 0x8a, NAND_OPEN_FLAG_SAFE_OPEN);
         return NAND_RESULT_OK;
@@ -488,6 +492,11 @@ extern "C" int32_t NANDSafeOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint
     }
 
     const int32_t fd = AllocateFd(tempPath, file, static_cast<int32_t>(mode));
+    if (fd < 0) {
+        std::fclose(file);
+        NandRemove(tempPath);  // the scratch file was ours; do not leave it behind
+        return fd;
+    }
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         auto it = g_fileHandles.find(fd);

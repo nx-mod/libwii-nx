@@ -10,6 +10,10 @@
 #include "memory.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
+#include "nand_path.h"
+
+#include <filesystem>
+#include <system_error>
 
 namespace {
 
@@ -113,16 +117,43 @@ extern "C" uint32_t SCGetProductGameRegion_HLE()
 
 PPC_NATIVE_OVERRIDE(801B24C8, SCGetProductGameRegion_HLE, uint32_t, (), ());
 
-// These stubs make the game think all titles are installed; otherwise it checks title ID
-// 0x00010004524d4350 ("RMCP", Mario Kart Wii PAL) and reports error code 5.
-
 // 0x801AE4A0 -> OS__IsTitleInstalled(titleIdHi, titleIdLo)
 // Returns: 1 = installed, 0 = not installed
+//
+// This answered yes to everything, because a game that is told it is not itself
+// installed gives up: Mario Kart checks for 0x00010004524d4350 ("RMCP") and
+// reports error code 5. Saying yes to everything is worse for anything that
+// asks about titles other than itself - the System Menu builds its channel list
+// out of these answers, and would believe in every channel it thought to ask
+// about.
+//
+// So answer from the NAND, which is the thing being asked about: a title is
+// installed when its TMD is there. The one exception is a title asking about
+// itself, which is installed by definition, because it is running.
 extern "C" uint32_t OS__IsTitleInstalled(uint32_t titleIdHi, uint32_t titleIdLo)
 {
-    RT_LOGF(RT_TAG_HLE, "CINS: OSIsTitleInstalled(0x%08X%08X) -> 1 (stubbed as installed)\n",
+    char relative[64];
+    std::snprintf(relative, sizeof(relative), "title/%08x/%08x/content/title.tmd",
+                  titleIdHi, titleIdLo);
+    std::error_code ec;
+    const std::filesystem::path tmd = RuntimeNandPath::ResolveNandRootPath() / relative;
+    if (std::filesystem::exists(tmd, ec)) {
+        RT_LOGF(RT_TAG_HLE, "CINS: OSIsTitleInstalled(0x%08X%08X) -> 1 (its TMD is in the NAND)\n",
+                titleIdHi, titleIdLo);
+        return 1;
+    }
+
+    if (Memory::Contains(0x80000000u, 4u) && Memory::Read32(0x80000000u) == titleIdLo) {
+        RT_LOGF(RT_TAG_HLE,
+                "CINS: OSIsTitleInstalled(0x%08X%08X) -> 1 (this is the running title; its TMD "
+                "is not in the NAND)\n",
+                titleIdHi, titleIdLo);
+        return 1;
+    }
+
+    RT_LOGF(RT_TAG_HLE, "CINS: OSIsTitleInstalled(0x%08X%08X) -> 0 (no TMD in the NAND)\n",
             titleIdHi, titleIdLo);
-    return 1; // Always report installed
+    return 0;
 }
 
 PPC_NATIVE_OVERRIDE(801AE4A0, OS__IsTitleInstalled, uint32_t, (uint32_t titleIdHi, uint32_t titleIdLo), (titleIdHi, titleIdLo));
@@ -132,12 +163,54 @@ PPC_NATIVE_OVERRIDE(801AE4A0, OS__IsTitleInstalled, uint32_t, (uint32_t titleIdH
 extern "C" uint32_t OS__CheckInstall(uint32_t requiredBlocks, uint32_t titleIdHi, 
                                       uint32_t titleIdLo, uint32_t outFlagsPtr)
 {
-    RT_LOGF(RT_TAG_HLE, "OS__CheckInstall(blocks=%u, 0x%08X%08X) -> success (stubbed)\n",
-            requiredBlocks, titleIdHi, titleIdLo);
-    if (outFlagsPtr != 0) {
-        Memory::Write32(outFlagsPtr, 0x3); // has data + has update = fully installed
+    // bit0: the title's data is here. bit1: its update is here. bit2: room is
+    // still needed. This used to answer 0x3 for anything - data and update
+    // present, nothing needed - which is a promise about a NAND nobody looked
+    // at. The flags are answerable now: whether its own directory holds
+    // anything, and whether the blocks asked for would fit.
+    uint32_t flags = 0;
+    std::error_code ec;
+    char relative[48];
+    std::snprintf(relative, sizeof(relative), "title/%08x/%08x", titleIdHi, titleIdLo);
+    const std::filesystem::path titleDir = RuntimeNandPath::ResolveNandRootPath() / relative;
+    if (std::filesystem::exists(titleDir / "content" / "title.tmd", ec)) {
+        flags |= 0x1;
     }
-    return 0; // Success
+    if (std::filesystem::exists(titleDir / "data", ec) &&
+        !std::filesystem::is_empty(titleDir / "data", ec)) {
+        flags |= 0x2;
+    }
+
+    // A block is eight clusters of sixteen kilobytes, and the NAND holds
+    // 0x7ec0 of them less 0x300 reserved.
+    constexpr uint64_t kClusterBytes = 16384;
+    constexpr uint64_t kClustersPerBlock = 8;
+    constexpr uint64_t kUsableClusters = 0x7ec0 - 0x300;
+    uint64_t usedClusters = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(
+             RuntimeNandPath::ResolveNandRootPath(), ec)) {
+        if (ec) break;
+        std::error_code entryEc;
+        if (entry.is_regular_file(entryEc)) {
+            const uint64_t size = static_cast<uint64_t>(entry.file_size(entryEc));
+            if (!entryEc) usedClusters += (size + kClusterBytes - 1) / kClusterBytes;
+        }
+    }
+    const uint64_t freeBlocks = usedClusters >= kUsableClusters
+                                    ? 0
+                                    : (kUsableClusters - usedClusters) / kClustersPerBlock;
+    if (requiredBlocks > freeBlocks) {
+        flags |= 0x4;  // room is needed
+    }
+
+    RT_LOGF(RT_TAG_HLE,
+            "OS__CheckInstall(blocks=%u, 0x%08X%08X) -> flags 0x%X (%llu block(s) free)\n",
+            requiredBlocks, titleIdHi, titleIdLo, flags,
+            static_cast<unsigned long long>(freeBlocks));
+    if (outFlagsPtr != 0) {
+        Memory::Write32(outFlagsPtr, flags);
+    }
+    return 0; // the query itself succeeded; the flags say what it found
 }
 
 PPC_NATIVE_OVERRIDE(801AD1D4, OS__CheckInstall, uint32_t, (uint32_t requiredBlocks, uint32_t titleIdHi, uint32_t titleIdLo, uint32_t outFlagsPtr), (requiredBlocks, titleIdHi, titleIdLo, outFlagsPtr));

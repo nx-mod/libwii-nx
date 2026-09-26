@@ -142,6 +142,11 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
                         NandRemove(tempPath);
                     } else {
                         const int32_t shadowFd = AllocateFd(tempPath, shadow, static_cast<int32_t>(mode));
+                        if (shadowFd < 0) {
+                            std::fclose(shadow);
+                            NandRemove(tempPath);
+                            return shadowFd;  // no free handle
+                        }
                         {
                             std::lock_guard<std::mutex> lock(g_fdMutex);
                             auto it = g_fileHandles.find(shadowFd);
@@ -186,6 +191,10 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
     }
 
     int32_t fd = AllocateFd(hostPath, file, mode);
+    if (fd < 0) {
+        std::fclose(file);
+        return fd;  // no free handle; fileInfo is left untouched
+    }
     Memory::Write32(fileInfoPtr, static_cast<uint32_t>(fd));
     Memory::Write8(fileInfoPtr + 0x8a, NAND_OPEN_FLAG_OPEN);
     return NAND_RESULT_OK;

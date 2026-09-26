@@ -57,6 +57,19 @@ constexpr uint32_t kNandTitleIdLo = 0x524D4350; // "RMCP" fallback
 // the split records intent and is the single place to add filtering later.
 void LogNandError(const char* func, const char* fmt, ...);
 void LogNandWarning(const char* func, const char* fmt, ...);
+
+// Says, once per site, that what was just answered is close rather than right -
+// somewhere the console's own behaviour depends on something we do not keep.
+// These are the lines to look for first when a game does something inexplicable:
+// a silent approximation is indistinguishable from a bug until it is named.
+#define NAND_APPROXIMATION(what, why)                                       \
+    do {                                                                    \
+        static bool said = false;                                           \
+        if (!said) {                                                        \
+            said = true;                                                    \
+            LogNandWarning("approximation", "%s: %s", (what), (why));       \
+        }                                                                   \
+    } while (false)
 void NandTraceCall(const char* func, const char* fmt, ...);
 
 // A system save this session created (so far empty). Reads of it must not be
@@ -108,6 +121,26 @@ std::filesystem::path TranslateNandPath(const char* wiiPath);
 bool CreateDirectoryPath(const std::filesystem::path& path);
 bool PathExists(const std::filesystem::path& path);
 bool IsDirectory(const std::filesystem::path& path);
+
+// A path the console would accept, and nothing more: absolute, between two and
+// sixty-four characters, no trailing slash, and no component past twelve. The
+// limits are the NAND's own, so a game that probes them is told here what it
+// would be told there - and a path we cannot store is refused rather than
+// quietly turned into a host path that happens to work.
+bool NandPathIsValid(const std::string& wiiPath);
+
+// Whether a single entry name would fit the FST: twelve characters, no
+// separator. Asked when creating, not when resolving.
+bool NandFilenameIsValid(const std::string& name);
+
+// How many components a path has. Past eight a console reports too many
+// components, which is a different answer from a malformed path.
+size_t NandPathDepth(const std::string& wiiPath);
+inline constexpr size_t kNandMaxPathDepth = 8;
+
+// How many files IOS will hold open at once. Past this it reports no free
+// handle rather than opening another.
+inline constexpr size_t kNandMaxOpenFiles = 16;
 
 // Create the directory that contains `path`. False when `path` has no directory
 // component, i.e. there was nothing to create.

@@ -424,6 +424,10 @@ extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
     }
     
     int32_t fd = AllocateFd(hostPath, file, mode);
+    if (fd < 0) {
+        std::fclose(file);  // no handle to own it
+        return fd;
+    }
     return fd;
 }
 PPC_NATIVE_OVERRIDE(801938F8, NAND_IOS_Open_HLE, int32_t, (uint32_t pathPtr, uint32_t mode), (pathPtr, mode));
@@ -719,6 +723,8 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                 Memory::Write32(outBufPtr + 0x00, kNandClusterSize);
                 Memory::Write32(outBufPtr + 0x04, kNandUsableClusters - usedClusters);
                 Memory::Write32(outBufPtr + 0x08, usedClusters);
+                NAND_APPROXIMATION("ISFS_GetStats bad clusters",
+                                   "always zero; we have no flash to go bad");
                 Memory::Write32(outBufPtr + 0x0C, 0);  // bad clusters
                 Memory::Write32(outBufPtr + 0x10, kNandReservedClusters);
                 Memory::Write32(outBufPtr + 0x14, kNandTotalInodes - usedInodes);
@@ -1007,8 +1013,11 @@ static int32_t HandleIsfsGetUsage(uint32_t numIn, uint32_t numOut, uint32_t vect
         return ISFS_EINVAL;
     }
     const std::string wiiPath = ReadGuestCString(pathVec.address, 64);
-    if (wiiPath.empty()) {
+    if (!NandPathIsValid(wiiPath)) {
         return ISFS_EINVAL;
+    }
+    if (NandPathDepth(wiiPath) > kNandMaxPathDepth) {
+        return ISFS_EINVAL;  // a console reports too many components here
     }
     const std::filesystem::path hostPath = TranslateNandPath(wiiPath.c_str());
     if (!IsDirectory(hostPath)) {
@@ -1018,6 +1027,9 @@ static int32_t HandleIsfsGetUsage(uint32_t numIn, uint32_t numOut, uint32_t vect
     uint64_t inodes = 0;
     uint64_t clusters = 0;
     CountNandUsage(hostPath, inodes, clusters);
+    NAND_APPROXIMATION("ISFS_GetUsage",
+                       "counts host files; a console counts its own FST entries, "
+                       "which differ where a name could not be stored");
     Memory::Write32(clusterOut.address,
                     static_cast<uint32_t>(std::min<uint64_t>(clusters, kNandUsableClusters)));
     Memory::Write32(inodeOut.address,
@@ -1035,8 +1047,11 @@ static int32_t HandleIsfsReadDir(uint32_t numIn, uint32_t numOut, uint32_t vecto
 
     const IosVector pathVec = ReadIosVector(vectorPtr, 0);
     const std::string wiiPath = ReadGuestCString(pathVec.address, 64);
-    if (wiiPath.empty()) {
+    if (!NandPathIsValid(wiiPath)) {
         return ISFS_EINVAL;
+    }
+    if (NandPathDepth(wiiPath) > kNandMaxPathDepth) {
+        return ISFS_EINVAL;  // a console reports too many components here
     }
     const std::filesystem::path hostPath = TranslateNandPath(wiiPath.c_str());
     if (!IsDirectory(hostPath)) {
@@ -1055,7 +1070,25 @@ static int32_t HandleIsfsReadDir(uint32_t numIn, uint32_t numOut, uint32_t vecto
         }
         names.push_back(std::move(name));
     }
+    // A console hands these back in the order its FST holds them, which is
+    // newest first: Nintendo walks a linked list that new entries are pushed
+    // onto the front of, and at least one game is known to depend on it
+    // (Dolphin's ReadDirectory cites issue 10234). We keep no FST, so the
+    // closest thing we have is when each file was written - which is the same
+    // order for anything the game itself created, and arbitrary for the files
+    // a title was installed with.
     std::sort(names.begin(), names.end());
+    std::stable_sort(names.begin(), names.end(),
+                     [&hostPath](const std::string& a, const std::string& b) {
+                         std::error_code ec;
+                         const auto ta = std::filesystem::last_write_time(hostPath / a, ec);
+                         if (ec) return false;
+                         const auto tb = std::filesystem::last_write_time(hostPath / b, ec);
+                         if (ec) return false;
+                         return ta > tb;  // newest first
+                     });
+    NAND_APPROXIMATION("ISFS_ReadDir order",
+                       "newest first by write time; a console orders by its FST");
 
     if (countOnly) {
         const IosVector countOut = ReadIosVector(vectorPtr, 1);

@@ -88,8 +88,17 @@ std::map<int32_t, FileHandle> g_fileHandles;
 static int32_t g_nextFd = 100; // Start at 100 to avoid confusion with stdio fds
 std::mutex g_fdMutex;
 
+// IOS keeps sixteen of these and no more. An unbounded table cannot report a
+// NAND that has run out of handles, so a game that leaks them runs happily
+// here and fails on a console - or waits forever for a handle it was supposed
+// to be refused. The count is Dolphin's FSCore::Open, which answers
+// NoFreeHandle at sixteen.
 int32_t AllocateFd(const std::filesystem::path& path, FILE* file, int32_t mode) {
     std::lock_guard<std::mutex> lock(g_fdMutex);
+    if (g_fileHandles.size() >= kNandMaxOpenFiles) {
+        LogNandWarning("AllocateFd", "all %zu handles are in use", kNandMaxOpenFiles);
+        return NAND_RESULT_MAXFD;
+    }
     int32_t fd = g_nextFd++;
     g_fileHandles[fd] = {file, path, mode, 0};
     return fd;
@@ -397,6 +406,47 @@ static bool ResolveSharedContentPath(const std::string& wiiPath,
         return std::filesystem::exists(resolved);
     }
     return false;
+}
+
+// The rules a console applies, split the way it splits them - Dolphin's
+// IOS/FS/FileSystemCommon.cpp has IsValidPath, IsValidNonRootPath and
+// IsValidFilename as three separate questions, and they carry different
+// answers. Folding them together would refuse, as malformed, a path that is
+// merely absent, and a game reads those apart.
+bool NandPathIsValid(const std::string& wiiPath) {
+    constexpr size_t kMaxPathLength = 64;
+    if (wiiPath == "/") {
+        return true;
+    }
+    return wiiPath.size() > 1 && wiiPath.size() <= kMaxPathLength &&
+           wiiPath.front() == '/' && wiiPath.back() != '/';
+}
+
+// What a directory entry can be called: twelve characters, and no separator.
+// This is the question asked when something is created, not when a path is
+// merely being resolved.
+bool NandFilenameIsValid(const std::string& name) {
+    constexpr size_t kMaxFilenameLength = 12;
+    return !name.empty() && name.size() <= kMaxFilenameLength &&
+           name.find('/') == std::string::npos;
+}
+
+// How deep the FST goes. Past this a console reports too many components
+// rather than a bad path, so it is counted separately too.
+size_t NandPathDepth(const std::string& wiiPath) {
+    size_t depth = 0;
+    for (size_t at = 1; at <= wiiPath.size();) {
+        const size_t next = wiiPath.find('/', at);
+        const size_t end = next == std::string::npos ? wiiPath.size() : next;
+        if (end > at) {
+            ++depth;
+        }
+        if (next == std::string::npos) {
+            break;
+        }
+        at = next + 1;
+    }
+    return depth;
 }
 
 std::filesystem::path TranslateNandPath(const char* wiiPath) {
