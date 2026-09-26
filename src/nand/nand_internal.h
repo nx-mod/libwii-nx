@@ -133,6 +133,9 @@ bool NandPathIsValid(const std::string& wiiPath);
 // separator. Asked when creating, not when resolving.
 bool NandFilenameIsValid(const std::string& name);
 
+// The last component of a path: the name a create is asking for.
+std::string NandPathBasename(const std::string& wiiPath);
+
 // How many components a path has. Past eight a console reports too many
 // components, which is a different answer from a malformed path.
 size_t NandPathDepth(const std::string& wiiPath);

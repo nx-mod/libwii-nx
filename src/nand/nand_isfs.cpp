@@ -611,13 +611,22 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
     if (fd == ISFS_DEV_FD) {
         switch (cmd) {
             case ISFS_IOCTL_CREATEDIR: {
-                // Input buffer: path + attributes
-                if (!inBufPtr || inLen < 0x4c) {
+                // ISFSParams: the path sits at 0x06, after uid and gid, and the
+                // whole struct is 0x4a. Asking for more than that refuses a
+                // request of exactly the right size.
+                if (!inBufPtr || inLen < 0x4a || !Memory::Contains(inBufPtr, 0x4a)) {
                     return ISFS_EINVAL;
                 }
-                const char* path = (const char*)Memory::GetPointer(inBufPtr + 6);
-                const std::filesystem::path hostPath = TranslateNandPath(path);
-                
+                const std::string wiiPath = ReadGuestCString(inBufPtr + 6, 64);
+                if (!NandPathIsValid(wiiPath) ||
+                    !NandFilenameIsValid(NandPathBasename(wiiPath))) {
+                    return ISFS_EINVAL;
+                }
+                if (NandPathDepth(wiiPath) > kNandMaxPathDepth) {
+                    return ISFS_EINVAL;
+                }
+                const std::filesystem::path hostPath = TranslateNandPath(wiiPath.c_str());
+
                 if (CreateDirectoryPath(hostPath)) {
                     return ISFS_OK;
                 }
@@ -628,9 +637,12 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                 if (!inBufPtr || inLen < 0x40) {
                     return ISFS_EINVAL;
                 }
-                const char* path = (const char*)Memory::GetPointer(inBufPtr);
-                const std::filesystem::path hostPath = TranslateNandPath(path);
-                
+                const std::string wiiPath = ReadGuestCString(inBufPtr, 64);
+                if (!NandPathIsValid(wiiPath)) {
+                    return ISFS_EINVAL;
+                }
+                const std::filesystem::path hostPath = TranslateNandPath(wiiPath.c_str());
+
                 // fs::remove refuses a non-empty directory, matching rmdir.
                 if (NandRemove(hostPath)) {
                     return ISFS_OK;
@@ -642,37 +654,65 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                 if (!inBufPtr || !outBufPtr) {
                     return ISFS_EINVAL;
                 }
-                const char* path = (const char*)Memory::GetPointer(inBufPtr);
-                const std::filesystem::path hostPath = TranslateNandPath(path);
-                
+                const std::string wiiPath = ReadGuestCString(inBufPtr, 64);
+                if (!NandPathIsValid(wiiPath)) {
+                    return ISFS_EINVAL;
+                }
+                const std::filesystem::path hostPath = TranslateNandPath(wiiPath.c_str());
+
                 if (!PathExists(hostPath)) {
                     return ISFS_ENOENT;
                 }
                 
-                // Return fake attributes (owner UID, group ID, permissions)
-                // Format: u32 ownerID, u16 groupID, u8 ownerPerm, u8 groupPerm, u8 otherPerm, u8 attrs
-                uint8_t* outBuf = (uint8_t*)Memory::GetPointer(outBufPtr);
-                if (outBuf && outLen >= 0x4c) {
-                    std::memset(outBuf, 0, outLen);
-                    // Owner UID = 0
-                    Memory::Write32(outBufPtr, 0);
-                    // Group ID = 0
-                    Memory::Write16(outBufPtr + 4, 0);
-                    // Permissions: 3 = read/write for all
-                    Memory::Write8(outBufPtr + 0x49, 3); // owner perm
-                    Memory::Write8(outBufPtr + 0x46, 3); // group perm
-                    Memory::Write8(outBufPtr + 0x47, 3); // other perm
-                    Memory::Write8(outBufPtr + 0x48, IsDirectory(hostPath) ? 2 : 1); // attrs (2=dir, 1=file)
+                // ISFSParams, packed, as Dolphin's FileSystemProxy.cpp declares it:
+                //   uid u32 at 0x00, gid u16 at 0x04, path[64] at 0x06,
+                //   modes (owner, group, other) at 0x46, attribute u8 at 0x49.
+                //
+                // The fields here were shifted by one: the value meant for owner
+                // landed in the attribute, and whether the entry is a directory
+                // was written into other's permissions. ISFSParams carries no
+                // such flag - IOS keeps is_file in its own metadata, and a
+                // caller learns it from GetFileStats or ReadDir instead.
+                //
+                // IOS does not even clear this struct, so a real console returns
+                // stack leftovers in the rest of it. We zero it, as Dolphin does,
+                // because a deterministic answer is worth more than a faithful
+                // one nobody can rely on.
+                if (outLen < 0x4a || !Memory::Contains(outBufPtr, 0x4a)) {
+                    return ISFS_EINVAL;
                 }
+                for (uint32_t i = 0; i < 0x4a; ++i) {
+                    Memory::Write8(outBufPtr + i, 0);
+                }
+                Memory::Write32(outBufPtr + 0x00, 0);  // uid: everything is ours
+                Memory::Write16(outBufPtr + 0x04, 0);  // gid
+                constexpr uint8_t kModeReadWrite = 3;  // None 0, Read 1, Write 2, ReadWrite 3
+                Memory::Write8(outBufPtr + 0x46, kModeReadWrite);  // owner
+                Memory::Write8(outBufPtr + 0x47, kModeReadWrite);  // group
+                Memory::Write8(outBufPtr + 0x48, kModeReadWrite);  // other
+                Memory::Write8(outBufPtr + 0x49, 0);               // attribute
+                NAND_APPROXIMATION("ISFS_GetAttr",
+                                   "everything is owned by uid 0 and readable and writable by "
+                                   "all; we keep no per-file ownership");
                 return ISFS_OK;
             }
             
             case ISFS_IOCTL_CREATEFILE: {
-                if (!inBufPtr || inLen < 0x4c) {
+                if (!inBufPtr || inLen < 0x4a || !Memory::Contains(inBufPtr, 0x4a)) {
                     return ISFS_EINVAL;
                 }
-                const char* path = (const char*)Memory::GetPointer(inBufPtr + 6);
-                const std::filesystem::path hostPath = TranslateNandPath(path);
+                const std::string wiiPath = ReadGuestCString(inBufPtr + 6, 64);
+                // A name the FST cannot hold is refused here, not silently
+                // written to a host filesystem that happens to allow it - and
+                // then invisible to ReadDir, which drops names over twelve.
+                if (!NandPathIsValid(wiiPath) ||
+                    !NandFilenameIsValid(NandPathBasename(wiiPath))) {
+                    return ISFS_EINVAL;
+                }
+                if (NandPathDepth(wiiPath) > kNandMaxPathDepth) {
+                    return ISFS_EINVAL;
+                }
+                const std::filesystem::path hostPath = TranslateNandPath(wiiPath.c_str());
                 CreateParentDirectories(hostPath);
 
                 // Create empty file
@@ -695,10 +735,13 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                 if (!inBufPtr || inLen < 0x80) {
                     return ISFS_EINVAL;
                 }
-                const char* srcPath = (const char*)Memory::GetPointer(inBufPtr);
-                const char* dstPath = (const char*)Memory::GetPointer(inBufPtr + 0x40);
-                const std::filesystem::path srcHost = TranslateNandPath(srcPath);
-                const std::filesystem::path dstHost = TranslateNandPath(dstPath);
+                const std::string srcWii = ReadGuestCString(inBufPtr, 64);
+                const std::string dstWii = ReadGuestCString(inBufPtr + 0x40, 64);
+                if (!NandPathIsValid(srcWii) || !NandPathIsValid(dstWii)) {
+                    return ISFS_EINVAL;
+                }
+                const std::filesystem::path srcHost = TranslateNandPath(srcWii.c_str());
+                const std::filesystem::path dstHost = TranslateNandPath(dstWii.c_str());
                 
                 if (NandRename(srcHost, dstHost)) {
                     return ISFS_OK;
@@ -733,7 +776,18 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
             }
             
             case ISFS_IOCTL_SETATTR: {
-                // Ignore attribute changes - we don't implement file permissions
+                // Nothing here keeps ownership or permissions, so there is
+                // nowhere to put these. Refusing would be worse: a title that
+                // cannot set the attributes on a save it just wrote treats that
+                // as a failed save. Accepting and saying so is the honest
+                // middle - and the input is still checked, so a malformed
+                // request is answered as malformed rather than as success.
+                if (!inBufPtr || inLen < 0x4a || !Memory::Contains(inBufPtr, 0x4a)) {
+                    return ISFS_EINVAL;
+                }
+                NAND_APPROXIMATION("ISFS_SetAttr",
+                                   "accepted and discarded; we keep no per-file ownership or "
+                                   "permissions for GetAttr to return");
                 return ISFS_OK;
             }
             

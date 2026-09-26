@@ -425,6 +425,12 @@ bool NandPathIsValid(const std::string& wiiPath) {
 // What a directory entry can be called: twelve characters, and no separator.
 // This is the question asked when something is created, not when a path is
 // merely being resolved.
+// The last component of a path, which is the name being created.
+std::string NandPathBasename(const std::string& wiiPath) {
+    const size_t at = wiiPath.rfind('/');
+    return at == std::string::npos ? wiiPath : wiiPath.substr(at + 1);
+}
+
 bool NandFilenameIsValid(const std::string& name) {
     constexpr size_t kMaxFilenameLength = 12;
     return !name.empty() && name.size() <= kMaxFilenameLength &&
