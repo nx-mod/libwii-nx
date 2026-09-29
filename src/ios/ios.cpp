@@ -24,7 +24,7 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(uint32_t fd, uint32_t cmd, uint32_t inBufP
 extern "C" int32_t NAND_IOS_Ioctlv_HLE(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut,
                                        uint32_t vectorPtr);
 
-extern "C" uint32_t OSResetSystem();
+extern "C" void RuntimeLeave(bool restart);  // libdol-nx os_reset.cpp: power off closes, reset restarts
 extern "C" bool Sdio_HLE_IsFd(uint32_t fd);
 extern "C" int32_t Sdio_HLE_Ioctl(uint32_t cmd, uint32_t in, uint32_t inLen, uint32_t out,
                                   uint32_t outLen, uint32_t callback, uint32_t callbackArg,
@@ -68,15 +68,14 @@ extern "C" int32_t Stm_HLE_Open(const char* path) {
 
 extern "C" bool Stm_HLE_IsFd(uint32_t fd) { return fd == kStmImmediateFd || fd == kStmEventHookFd; }
 
-// Synchronous STM commands. Shutdown and reset leave the program the way
-// OSResetSystem does; everything else is answered and has no effect.
+// Synchronous STM commands. Shutdown closes the program, a reset starts it
+// again; everything else is answered and has no effect.
 extern "C" int32_t Stm_HLE_Ioctl(uint32_t fd, uint32_t cmd, uint32_t outBuf, uint32_t outLen) {
     switch (cmd) {
     case kStmShutdown:
     case kStmHotReset:
     case kStmHotResetForPd:
-        std::fprintf(stderr, "[STM] %s: leaving\n", cmd == kStmShutdown ? "shutdown" : "reset");
-        OSResetSystem();
+        RuntimeLeave(cmd != kStmShutdown);
         return 0;
     case kStmReleaseEventHook:
         if (g_stmHookCallback != 0) {
