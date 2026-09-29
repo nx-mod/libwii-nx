@@ -24,12 +24,12 @@ os pad si vi`. Those are libdol-nx's. What is left is the Wii's own.
 | `isfs` | the NAND as a filesystem, as a game sees it |
 | `nand` | saves, and the console's own files |
 | `wpad` / `kpad` | the Wii Remote, its extensions and its pointer |
-| `wud` | the Bluetooth stack underneath them |
+| `wud` | the Bluetooth stack underneath them *(to write)* |
 | `sc` | the console's settings, as a game reads them |
-| `arc` | U8 archives |
-| `tpl` | texture palettes |
-| `mem` | the Wii's expanded memory and its allocators |
-| `usb` | devices reached over IOS |
+| `arc` | U8 archives *(to write)* |
+| `tpl` | texture palettes *(to write)* |
+| `mem` | the Wii's expanded memory and its allocators *(to write)* |
+| `usb` | devices reached over IOS *(to write)* |
 
 The Wii's *file formats* - SYSCONF, the Mii database, tickets, TMDs, WADs - are
 not here. They are bytes, not hardware, so they live in libdol-nx's `format`
