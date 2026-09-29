@@ -599,6 +599,11 @@ static int32_t HandleShaIoctlv(int32_t fd, uint32_t cmd, uint32_t numIn, uint32_
     return ISFS_OK;
 }
 
+// /dev/stm lives in ios/ios.cpp.
+extern "C" int32_t Stm_HLE_Open(const char* path);
+extern "C" bool Stm_HLE_IsFd(uint32_t fd);
+extern "C" int32_t Stm_HLE_Ioctl(uint32_t fd, uint32_t cmd, uint32_t outBuf, uint32_t outLen);
+
 extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
     const std::string pathStorage = ReadGuestCString(pathPtr);
     const char* path = pathPtr == 0 ? nullptr : pathStorage.c_str();
@@ -625,6 +630,9 @@ extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
         }
         if (std::strcmp(path, "/dev/dolphin") == 0) {
             return DOLPHIN_DEV_FD;
+        }
+        if (const int32_t stmFd = Stm_HLE_Open(path)) {
+            return stmFd;
         }
         LogNandWarning("IOS_Open", "unknown device '%s' mode=%u", path, mode);
         return ISFS_ENOENT;
@@ -681,6 +689,9 @@ extern "C" void NAND_IOS_OpenBody_HLE_801938FC(CpuContext* ctx) {
 REGISTER_NATIVE_FUNCTION_AS(0x801938FC, NAND_IOS_OpenBody_HLE_801938FC, "NAND_IOS_OpenBody_HLE_801938FC");
 
 extern "C" int32_t NAND_IOS_Close_HLE(uint32_t fd) {
+    if (Stm_HLE_IsFd(fd)) {
+        return ISFS_OK;
+    }
     if (fd == ISFS_DEV_FD) {
         return ISFS_OK;
     }
@@ -842,6 +853,9 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
 
     if (Network_HLE_IsFd(fd)) {
         return Network_HLE_Ioctl(fd, cmd, inBufPtr, inLen, outBufPtr, outLen);
+    }
+    if (Stm_HLE_IsFd(fd)) {
+        return Stm_HLE_Ioctl(fd, cmd, outBufPtr, outLen);
     }
 
     if (GetShaHandle(static_cast<int32_t>(fd))) {

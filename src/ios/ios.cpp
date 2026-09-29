@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 
 void NandQueueIosCallback(uint32_t callbackPtr, int32_t result, uint32_t callbackArg);
@@ -22,6 +23,78 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(uint32_t fd, uint32_t cmd, uint32_t inBufP
                                       uint32_t outBufPtr, uint32_t outLen);
 extern "C" int32_t NAND_IOS_Ioctlv_HLE(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut,
                                        uint32_t vectorPtr);
+
+extern "C" uint32_t OSResetSystem();  // libdol-nx os_reset.cpp: stops audio, exits cleanly
+
+// ============================================================================
+// /dev/stm: power and reset
+// ============================================================================
+//
+// __OSInitSTM (libdol-nx os_init.cpp) hands the OS these two handles, and a
+// title that opens /dev/stm/immediate or /dev/stm/eventhook itself gets the
+// same ones. Commands as Dolphin's IOS/STM names them.
+static constexpr uint32_t kStmImmediateFd = 0x00535401;
+static constexpr uint32_t kStmEventHookFd = 0x00535402;
+enum : uint32_t {
+    kStmEventHook = 0x1000,
+    kStmHotReset = 0x2001,
+    kStmHotResetForPd = 0x2002,
+    kStmShutdown = 0x2003,
+    kStmIdle = 0x2004,
+    kStmWakeup = 0x2005,
+    kStmGetIdleMode = 0x3001,
+    kStmReleaseEventHook = 0x3002,
+    kStmViDimming = 0x5001,
+    kStmLedFlash = 0x6001,
+    kStmLedMode = 0x6002,
+    kStmReadVersion = 0x7001,
+};
+
+// The event hook completes when a button is pressed - never, here, until
+// something asks. It is held rather than answered at once: answering is what
+// tells the OS the power button was pressed.
+static uint32_t g_stmHookCallback = 0;
+static uint32_t g_stmHookArg = 0;
+
+extern "C" int32_t Stm_HLE_Open(const char* path) {
+    if (std::strcmp(path, "/dev/stm/immediate") == 0) return static_cast<int32_t>(kStmImmediateFd);
+    if (std::strcmp(path, "/dev/stm/eventhook") == 0) return static_cast<int32_t>(kStmEventHookFd);
+    return 0;
+}
+
+extern "C" bool Stm_HLE_IsFd(uint32_t fd) { return fd == kStmImmediateFd || fd == kStmEventHookFd; }
+
+// Synchronous STM commands. Shutdown and reset leave the program the way
+// OSResetSystem does; everything else is answered and has no effect.
+extern "C" int32_t Stm_HLE_Ioctl(uint32_t fd, uint32_t cmd, uint32_t outBuf, uint32_t outLen) {
+    switch (cmd) {
+    case kStmShutdown:
+    case kStmHotReset:
+    case kStmHotResetForPd:
+        std::fprintf(stderr, "[STM] %s: leaving\n", cmd == kStmShutdown ? "shutdown" : "reset");
+        OSResetSystem();
+        return 0;
+    case kStmReleaseEventHook:
+        if (g_stmHookCallback != 0) {
+            NandQueueIosCallback(g_stmHookCallback, 0, g_stmHookArg);  // released, no event
+            g_stmHookCallback = 0;
+        }
+        return 0;
+    case kStmGetIdleMode:
+    case kStmReadVersion:
+        if (outBuf != 0 && outLen >= 4 && Memory::Contains(outBuf, 4)) Memory::Write32(outBuf, 0);
+        return 0;
+    case kStmIdle:
+    case kStmWakeup:
+    case kStmViDimming:
+    case kStmLedFlash:
+    case kStmLedMode:
+        return 0;
+    default:
+        std::fprintf(stderr, "[STM] fd 0x%08X cmd 0x%04X not handled\n", fd, cmd);
+        return -4;  // IPC_EINVAL
+    }
+}
 
 namespace {
 
@@ -107,6 +180,12 @@ extern "C" void IOS_IoctlAsync_80194158(CpuContext* ctx)
         return;
     }
 
+    if (fd == kStmEventHookFd && cmd == kStmEventHook) {
+        g_stmHookCallback = callback;
+        g_stmHookArg = callbackArg;
+        SetIosReturn(ctx, 0);  // queued; completes on an event
+        return;
+    }
     const int32_t result = NAND_IOS_Ioctl_HLE(fd, cmd, inBuf, inLen, outBuf, outLen);
     CompleteAsync(ctx, callback, result, callbackArg); // Success
 }
