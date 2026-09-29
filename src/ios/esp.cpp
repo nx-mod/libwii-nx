@@ -1,7 +1,10 @@
-// ESP HLE Stubs
-// ESP functions communicate with /dev/es to get title information.
-// We stub these to return Mario Kart Wii's title ID directly.
+// ESP: what /dev/es answers about the running title.
+//
+// The title id is the project's own (recomp.yml project.title_id, carried in the
+// generated RuntimeConfig.h). A disc game without one reports 00010004 and the
+// id in its disc header, as Mario Kart Wii does.
 
+#include "generated/RuntimeConfig.h"
 #include "hle_stubs.h"
 #include "memory.h"
 #include "runtime_log.h"
@@ -11,10 +14,10 @@
 #include <cstdlib>
 #include <cctype>
 
-static constexpr uint32_t MKW_TITLE_ID_HI = 0x00010004;
-static constexpr uint32_t MKW_TITLE_ID_LO = 0x524D4350; // "RMCP" fallback
+static constexpr uint32_t kDiscTitleIdHi = 0x00010004;
+static constexpr uint32_t kFallbackTitleIdLo = 0x524D4350; // "RMCP"
 
-static bool IsValidEspTitleCode(uint32_t code) {
+[[maybe_unused]] static bool IsValidEspTitleCode(uint32_t code) {
     for (int shift = 24; shift >= 0; shift -= 8) {
         const char ch = static_cast<char>((code >> shift) & 0xffu);
         if (!std::isalnum(static_cast<unsigned char>(ch))) {
@@ -24,7 +27,18 @@ static bool IsValidEspTitleCode(uint32_t code) {
     return true;
 }
 
+static uint32_t CurrentTitleIdHi() {
+#if defined(RUNTIME_CONFIG_HAS_TITLE_ID)
+    return RuntimeConfig::TITLE_ID_HI;
+#else
+    return kDiscTitleIdHi;
+#endif
+}
+
 static uint32_t CurrentTitleIdLo() {
+#if defined(RUNTIME_CONFIG_HAS_TITLE_ID)
+    return RuntimeConfig::TITLE_ID_LO;
+#else
     if (Memory::Contains(0x80000000u, 4u)) {
         const uint32_t code = Memory::Read32(0x80000000u);
         if (IsValidEspTitleCode(code)) {
@@ -32,7 +46,8 @@ static uint32_t CurrentTitleIdLo() {
         }
     }
 
-    return MKW_TITLE_ID_LO;
+    return kFallbackTitleIdLo;
+#endif
 }
 
 // The guest asked for its title ID or data directory through a pointer we cannot
@@ -76,7 +91,7 @@ extern "C" int32_t ESP_GetTitleId_stub(uint32_t outPtr)
     }
 
     // Write title ID (big-endian)
-    Memory::Write32(outPtr, MKW_TITLE_ID_HI);
+    Memory::Write32(outPtr, CurrentTitleIdHi());
     Memory::Write32(outPtr + 4, CurrentTitleIdLo());
     return 0;
 }
