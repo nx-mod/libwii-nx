@@ -110,7 +110,10 @@ void CloseFd(int32_t fd);
 // Path Translation
 // ============================================================================
 
-uint32_t CurrentMkwTitleIdLo();
+// The running title's id: the project's own (RuntimeConfig.h TITLE_ID_HI/LO)
+// when it names one, otherwise a disc game's 00010004 and its disc id.
+uint32_t CurrentTitleIdHi();
+uint32_t CurrentTitleIdLo();
 std::string CurrentNandDataDir();
 const std::filesystem::path& GetNandBasePath();
 
