@@ -4,17 +4,22 @@
 #include "runtime_log.h"
 
 #include <dolphin/pad.h>
+#include <aurora/gamepad.h>
+
+// Switch reads its controllers from libnx; desktop reaches Wii Remotes through
+// SDL's HIDAPI driver.
+#if defined(__SWITCH__)
+#include <switch.h>
+#else
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_log.h>
 #include <SDL3/SDL_sensor.h>
 #include <SDL3/SDL_timer.h>
-
-#if defined(__SWITCH__)
-#include <switch.h>
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -24,6 +29,14 @@
 #include <unordered_set>
 
 namespace WiiRemoteInput {
+namespace {
+uint64_t TicksMs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
+}  // namespace
+
 namespace {
 
 // Dolphin's continuous scanning polls Bluetooth about once a second; SDL's
@@ -40,10 +53,10 @@ constexpr uint64_t kRescanDriverOffMs = 100;
 constexpr float kStandardGravity = 9.80665f;
 
 // SDL's Wii driver posts the remote's own buttons as raw joystick buttons
-// starting at SDL_GAMEPAD_BUTTON_MISC1, in this order (SDL_hidapi_wii.c,
+// starting at AURORA_GAMEPAD_BUTTON_MISC1, in this order (SDL_hidapi_wii.c,
 // EWiiButtons), whatever the extension.
 enum RawWiiButton : int {
-    kRawA = SDL_GAMEPAD_BUTTON_MISC1,
+    kRawA = AURORA_GAMEPAD_BUTTON_MISC1,
     kRawB,
     kRawOne,
     kRawTwo,
@@ -151,7 +164,7 @@ uint64_t g_lostAtMs = 0;
 // Instance ids whose accelerometers have been switched on. SDL keeps sensors
 // off until asked and forgets that when the gamepad is closed, so a re-paired
 // remote gets a fresh id and is enabled again.
-std::array<SDL_JoystickID, PAD_MAX_CONTROLLERS> g_sensorsEnabledFor{};
+std::array<AuroraControllerID, PAD_MAX_CONTROLLERS> g_sensorsEnabledFor{};
 
 // Zero-point correction subtracted from the remote's accelerometer, in g and in
 // SDL's sensor frame; loaded from Config.toml on first use, replaced by a
@@ -196,16 +209,16 @@ bool NameContains(const char* name, const char* needle) {
 }
 
 // Turns on the remote (and Nunchuk) accelerometers once per gamepad instance.
-void EnsureSensors(SDL_Gamepad* gamepad, uint32_t port) {
-    const SDL_JoystickID id = SDL_GetGamepadID(gamepad);
+void EnsureSensors(AuroraGamepad* gamepad, uint32_t port) {
+    const AuroraControllerID id = aurora_gamepad_id(gamepad);
     if (g_sensorsEnabledFor[port] == id) {
         return;
     }
     bool allEnabled = true;
-    for (SDL_SensorType sensor : {SDL_SENSOR_ACCEL, SDL_SENSOR_ACCEL_L}) {
-        if (SDL_GamepadHasSensor(gamepad, sensor) && !SDL_SetGamepadSensorEnabled(gamepad, sensor, true)) {
+    for (AuroraSensorType sensor : {AURORA_SENSOR_ACCEL, AURORA_SENSOR_ACCEL_L}) {
+        if (aurora_gamepad_has_sensor(gamepad, sensor) && !aurora_gamepad_set_sensor_enabled(gamepad, sensor, true)) {
             RT_LOG(RT_TAG_CONFIG) << "Wii Remote on port " << (port + 1)
-                                  << ": could not enable an accelerometer: " << SDL_GetError() << std::endl;
+                                  << ": could not enable an accelerometer" << std::endl;
             allEnabled = false;
         }
     }
@@ -227,8 +240,8 @@ const std::array<float, 3>& AccelOffset() {
 }
 
 // Raw SDL sample in m/s^2, rejecting anything SDL has not delivered yet.
-bool ReadSdlAccel(SDL_Gamepad* gamepad, SDL_SensorType sensor, float* sdl) {
-    return SDL_GamepadSensorEnabled(gamepad, sensor) && SDL_GetGamepadSensorData(gamepad, sensor, sdl, 3) &&
+bool ReadSdlAccel(AuroraGamepad* gamepad, AuroraSensorType sensor, float* sdl) {
+    return aurora_gamepad_sensor_enabled(gamepad, sensor) && aurora_gamepad_sensor_data(gamepad, sensor, sdl, 3) &&
            std::isfinite(sdl[0]) && std::isfinite(sdl[1]) && std::isfinite(sdl[2]);
 }
 
@@ -239,17 +252,17 @@ bool ReadSdlAccel(SDL_Gamepad* gamepad, SDL_SensorType sensor, float* sdl) {
 // (+2.56, -2.56, -2.56) g for the Nunchuk (200 units/g). Handed to the game as
 // is, one such frame is a full-lock steer plus a 9 g "shake". `g` is the
 // uncorrected SDL sample.
-bool IsGlitchedSample(SDL_SensorType sensor, const float* g) {
+bool IsGlitchedSample(AuroraSensorType sensor, const float* g) {
     // An exact zero vector is SDL's sensor buffer before the first report, not
     // a reading (the remote never delivers 0 g on all three axes at once).
     if (g[0] == 0.0f && g[1] == 0.0f && g[2] == 0.0f) {
         return true;
     }
-    const float zero = sensor == SDL_SENSOR_ACCEL ? 5.12f : 2.56f;
+    const float zero = sensor == AURORA_SENSOR_ACCEL ? 5.12f : 2.56f;
     if (std::fabs(g[0] - zero) < 0.03f && std::fabs(g[1] + zero) < 0.03f && std::fabs(g[2] + zero) < 0.03f) {
         return true;
     }
-    if (sensor == SDL_SENSOR_ACCEL) {
+    if (sensor == AURORA_SENSOR_ACCEL) {
         for (int i = 0; i < 3; ++i) {
             if (std::fabs(g[i]) > kMaxPlausibleRemoteG) return true;
         }
@@ -263,7 +276,7 @@ bool IsGlitchedSample(SDL_SensorType sensor, const float* g) {
 // the face (+1 at rest, buttons up), z towards the user, i.e. away from the tip.
 // The remote's sample gets the zero-point correction; the Nunchuk's does not.
 // False when there is no sample yet or the sample is a glitch (see above).
-bool ReadAccelG(SDL_Gamepad* gamepad, SDL_SensorType sensor, float* g) {
+bool ReadAccelG(AuroraGamepad* gamepad, AuroraSensorType sensor, float* g) {
     float sdl[3] = {};
     if (!ReadSdlAccel(gamepad, sensor, sdl)) {
         return false;
@@ -272,7 +285,7 @@ bool ReadAccelG(SDL_Gamepad* gamepad, SDL_SensorType sensor, float* g) {
     if (IsGlitchedSample(sensor, g)) {
         return false;
     }
-    if (sensor == SDL_SENSOR_ACCEL) {
+    if (sensor == AURORA_SENSOR_ACCEL) {
         const std::array<float, 3>& offset = AccelOffset();
         for (int i = 0; i < 3; ++i) g[i] -= offset[i];
     }
@@ -292,7 +305,7 @@ void AccelGToKpad(const float* g, float* kpad) {
 }
 
 // Sensor -> KPAD acc for ReadKpadSample.
-bool ReadAccelAsKpad(SDL_Gamepad* gamepad, SDL_SensorType sensor, float* kpad) {
+bool ReadAccelAsKpad(AuroraGamepad* gamepad, AuroraSensorType sensor, float* kpad) {
     float g[3] = {};
     if (!ReadAccelG(gamepad, sensor, g)) {
         return false;
@@ -324,11 +337,11 @@ void TraceSample(uint32_t chan, const KpadSample& sample, const float* rawG, boo
     char line[192];
     if (haveRaw) {
         std::snprintf(line, sizeof(line), "%llu,%u,%04x,%.4f,%.4f,%.4f,%d,%.4f,%.4f,%.4f\n",
-                      static_cast<unsigned long long>(SDL_GetTicks()), chan + 1, sample.hold, rawG[0], rawG[1],
+                      static_cast<unsigned long long>(TicksMs()), chan + 1, sample.hold, rawG[0], rawG[1],
                       rawG[2], accepted ? 1 : 0, sample.acc[0], sample.acc[1], sample.acc[2]);
     } else {
         std::snprintf(line, sizeof(line), "%llu,%u,%04x,,,,0,%.4f,%.4f,%.4f\n",
-                      static_cast<unsigned long long>(SDL_GetTicks()), chan + 1, sample.hold, sample.acc[0],
+                      static_cast<unsigned long long>(TicksMs()), chan + 1, sample.hold, sample.acc[0],
                       sample.acc[1], sample.acc[2]);
     }
     trace << line;
@@ -349,19 +362,19 @@ void StepAccelCalibration() {
     if (!g_calibration.active) {
         return;
     }
-    SDL_Gamepad* gamepad = SDL_GetGamepadFromPlayerIndex(static_cast<int>(g_calibration.chan));
+    AuroraGamepad* gamepad = aurora_gamepad_for_player(static_cast<int>(g_calibration.chan));
     if (gamepad == nullptr || !IsRemoteChannel(g_calibration.chan)) {
         FinishAccelCalibration("Cancelled: the Wii Remote went away.");
         return;
     }
     EnsureSensors(gamepad, g_calibration.chan);
     float sdl[3] = {};
-    if (!ReadSdlAccel(gamepad, SDL_SENSOR_ACCEL, sdl)) {
+    if (!ReadSdlAccel(gamepad, AURORA_SENSOR_ACCEL, sdl)) {
         return; // no sample this frame; keep waiting
     }
     float g[3];
     for (int i = 0; i < 3; ++i) g[i] = sdl[i] / kStandardGravity;
-    if (IsGlitchedSample(SDL_SENSOR_ACCEL, g)) {
+    if (IsGlitchedSample(AURORA_SENSOR_ACCEL, g)) {
         return; // a zeroed report, not a movement
     }
     if (g_calibration.count == 0) {
@@ -407,6 +420,7 @@ bool AnyWiiControllerConnected() {
     return false;
 }
 
+#if !defined(__SWITCH__)
 // Route SDL's input diagnostics (HIDAPI open failures, the Wii driver's
 // extension/status messages) into console.log, minus the periodic chatter.
 // A sub-warning message is written once: SDL repeats the same line on every
@@ -473,6 +487,7 @@ void FinishRescan(uint64_t now) {
                               << PADCount() << " controller(s) known to aurora)" << std::endl;
     }
 }
+#endif  // !__SWITCH__
 
 } // namespace
 
@@ -520,7 +535,7 @@ void RescanNow() {
     // FinishRescan() a few frames later. Flipping 1->0->1 within one frame does
     // nothing: SDL only ever sees the final "1".
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_WII, "0");
-    g_driverOffSinceMs = SDL_GetTicks();
+    g_driverOffSinceMs = TicksMs();
     if (g_scanCount < 3) {
         RT_LOG(RT_TAG_CONFIG) << "Wii Remote rescan #" << (g_scanCount + 1) << ": HIDAPI Wii driver disabled"
                               << std::endl;
@@ -547,7 +562,7 @@ void Poll() {
         return;
     }
     // Always complete a rescan in progress so the driver is never left disabled.
-    FinishRescan(SDL_GetTicks());
+    FinishRescan(TicksMs());
     if (g_driverOffSinceMs != 0) {
         return;
     }
@@ -557,14 +572,14 @@ void Poll() {
         }
         g_scanning = false;
         g_scanCount = 0;
-        g_lastScanMs = SDL_GetTicks();
+        g_lastScanMs = TicksMs();
         return;
     }
     if (!RuntimeConfigFile::WiiContinuousScanEnabled(false)) {
         g_scanning = false;
         return;
     }
-    const uint64_t now = SDL_GetTicks();
+    const uint64_t now = TicksMs();
     if (!g_scanning) {
         RT_LOG(RT_TAG_CONFIG) << "No Wii Remote connected; "
                               << (kPeriodicRescan ? "scanning for one" : "waiting for one to be paired")
@@ -628,9 +643,9 @@ Kind KindForPort(uint32_t port) {
 #if defined(__SWITCH__)
     return padIsConnected(&EnsureSwitchPad(port)) ? Kind::RemoteWithClassic : Kind::NotWii;
 #else
-    SDL_Gamepad* gamepad = SDL_GetGamepadFromPlayerIndex(static_cast<int>(port));
+    AuroraGamepad* gamepad = aurora_gamepad_for_player(static_cast<int>(port));
     if (gamepad == nullptr) return Kind::NotWii;
-    return KindForName(SDL_GetGamepadName(gamepad));
+    return KindForName(aurora_gamepad_name(gamepad));
 #endif
 }
 
@@ -661,9 +676,9 @@ Kind EffectiveKind(uint32_t chan) {
     return KindForPort(chan);
 #else
     PortMemory& memory = g_ports[chan];
-    SDL_Gamepad* gamepad = SDL_GetGamepadFromPlayerIndex(static_cast<int>(chan));
-    const Kind live = gamepad != nullptr ? KindForName(SDL_GetGamepadName(gamepad)) : Kind::NotWii;
-    const uint64_t now = SDL_GetTicks();
+    AuroraGamepad* gamepad = aurora_gamepad_for_player(static_cast<int>(chan));
+    const Kind live = gamepad != nullptr ? KindForName(aurora_gamepad_name(gamepad)) : Kind::NotWii;
+    const uint64_t now = TicksMs();
     if (live != Kind::NotWii) {
         memory.lastKind = live;
         memory.lastSeenMs = now;
@@ -708,7 +723,7 @@ void FillGraceSample(uint32_t chan, Kind kind, KpadSample& sample) {
 // normalises every Classic Controller stick, whatever the report's resolution,
 // to a signed 10-bit value, -512..511 with 0 at the centre and +y up (RVL SDK
 // WPAD.h; wut's WPADStatusClassic documents the same range).
-int16_t ClassicStickRaw(Sint16 axis, bool invert) {
+int16_t ClassicStickRaw(int16_t axis, bool invert) {
     float value = static_cast<float>(axis) / 32767.0f;
     if (invert) value = -value;
     value = std::clamp(value, -1.0f, 1.0f);
@@ -764,8 +779,8 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
     sample.clTriggerR = SwitchTrigger(buttons, HidNpadButton_R);
     return true;
 #else
-    SDL_Gamepad* gamepad = SDL_GetGamepadFromPlayerIndex(static_cast<int>(chan));
-    const Kind kind = gamepad != nullptr ? KindForName(SDL_GetGamepadName(gamepad)) : Kind::NotWii;
+    AuroraGamepad* gamepad = aurora_gamepad_for_player(static_cast<int>(chan));
+    const Kind kind = gamepad != nullptr ? KindForName(aurora_gamepad_name(gamepad)) : Kind::NotWii;
     if (!IsKpadKind(kind)) {
         const Kind remembered = EffectiveKind(chan);
         if (!IsKpadKind(remembered)) {
@@ -774,15 +789,11 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
         FillGraceSample(chan, remembered, sample);
         return true;
     }
-    SDL_Joystick* joystick = SDL_GetGamepadJoystick(gamepad);
-    if (joystick == nullptr) {
-        return false;
-    }
     EnsureSensors(gamepad, chan);
 
     sample = {};
     const auto raw = [&](int index, uint32_t bit) {
-        if (SDL_GetJoystickButton(joystick, index)) sample.hold |= bit;
+        if (aurora_gamepad_raw_button(gamepad, index)) sample.hold |= bit;
     };
     raw(kRawA, kWpadA);
     raw(kRawB, kWpadB);
@@ -797,10 +808,10 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
     raw(kRawDpadRight, kWpadRight);
 
     float rawG[3] = {};
-    const bool haveRaw = ReadSdlAccel(gamepad, SDL_SENSOR_ACCEL, rawG);
+    const bool haveRaw = ReadSdlAccel(gamepad, AURORA_SENSOR_ACCEL, rawG);
     for (float& v : rawG) v /= kStandardGravity;
     LastAcc& last = g_lastAcc[chan];
-    const bool accepted = ReadAccelAsKpad(gamepad, SDL_SENSOR_ACCEL, sample.acc);
+    const bool accepted = ReadAccelAsKpad(gamepad, AURORA_SENSOR_ACCEL, sample.acc);
     if (accepted) {
         last.valid = true;
         for (int i = 0; i < 3; ++i) last.acc[i] = sample.acc[i];
@@ -816,32 +827,32 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
     if (kind == Kind::RemoteWithClassic) {
         sample.hasClassic = true;
         // The driver posts the extension's buttons as joystick buttons numbered
-        // by SDL_GAMEPAD_BUTTON_*: a/b/x/y by position (a on the east), +/-,
+        // by AURORA_GAMEPAD_BUTTON_*: a/b/x/y by position (a on the east), +/-,
         // Home, the L/R clicks as shoulders, the D-pad as buttons 11-14 (never
         // through SDL's gamepad mapping, which expects a hat), ZL/ZR as the
         // trigger axes.
         const auto cl = [&](int index, uint32_t bit) {
-            if (SDL_GetJoystickButton(joystick, index)) sample.clHold |= bit;
+            if (aurora_gamepad_raw_button(gamepad, index)) sample.clHold |= bit;
         };
-        cl(SDL_GAMEPAD_BUTTON_EAST, kClA);
-        cl(SDL_GAMEPAD_BUTTON_SOUTH, kClB);
-        cl(SDL_GAMEPAD_BUTTON_NORTH, kClX);
-        cl(SDL_GAMEPAD_BUTTON_WEST, kClY);
-        cl(SDL_GAMEPAD_BUTTON_START, kClPlus);
-        cl(SDL_GAMEPAD_BUTTON_BACK, kClMinus);
-        cl(SDL_GAMEPAD_BUTTON_GUIDE, kClHome);
-        cl(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, kClL);
-        cl(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, kClR);
-        cl(SDL_GAMEPAD_BUTTON_DPAD_UP, kClUp);
-        cl(SDL_GAMEPAD_BUTTON_DPAD_DOWN, kClDown);
-        cl(SDL_GAMEPAD_BUTTON_DPAD_LEFT, kClLeft);
-        cl(SDL_GAMEPAD_BUTTON_DPAD_RIGHT, kClRight);
-        if (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 0) sample.clHold |= kClZL;
-        if (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 0) sample.clHold |= kClZR;
-        const Sint16 lx = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTX);
-        const Sint16 ly = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTY);
-        const Sint16 rx = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
-        const Sint16 ry = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
+        cl(AURORA_GAMEPAD_BUTTON_EAST, kClA);
+        cl(AURORA_GAMEPAD_BUTTON_SOUTH, kClB);
+        cl(AURORA_GAMEPAD_BUTTON_NORTH, kClX);
+        cl(AURORA_GAMEPAD_BUTTON_WEST, kClY);
+        cl(AURORA_GAMEPAD_BUTTON_START, kClPlus);
+        cl(AURORA_GAMEPAD_BUTTON_BACK, kClMinus);
+        cl(AURORA_GAMEPAD_BUTTON_GUIDE, kClHome);
+        cl(AURORA_GAMEPAD_BUTTON_LEFT_SHOULDER, kClL);
+        cl(AURORA_GAMEPAD_BUTTON_RIGHT_SHOULDER, kClR);
+        cl(AURORA_GAMEPAD_BUTTON_DPAD_UP, kClUp);
+        cl(AURORA_GAMEPAD_BUTTON_DPAD_DOWN, kClDown);
+        cl(AURORA_GAMEPAD_BUTTON_DPAD_LEFT, kClLeft);
+        cl(AURORA_GAMEPAD_BUTTON_DPAD_RIGHT, kClRight);
+        if (aurora_gamepad_axis(gamepad, AURORA_GAMEPAD_AXIS_LEFT_TRIGGER) > 0) sample.clHold |= kClZL;
+        if (aurora_gamepad_axis(gamepad, AURORA_GAMEPAD_AXIS_RIGHT_TRIGGER) > 0) sample.clHold |= kClZR;
+        const int16_t lx = aurora_gamepad_axis(gamepad, AURORA_GAMEPAD_AXIS_LEFTX);
+        const int16_t ly = aurora_gamepad_axis(gamepad, AURORA_GAMEPAD_AXIS_LEFTY);
+        const int16_t rx = aurora_gamepad_axis(gamepad, AURORA_GAMEPAD_AXIS_RIGHTX);
+        const int16_t ry = aurora_gamepad_axis(gamepad, AURORA_GAMEPAD_AXIS_RIGHTY);
         sample.clLStick[0] = std::clamp(static_cast<float>(lx) / 32767.0f, -1.0f, 1.0f);
         sample.clLStick[1] = std::clamp(-static_cast<float>(ly) / 32767.0f, -1.0f, 1.0f);
         sample.clRStick[0] = std::clamp(static_cast<float>(rx) / 32767.0f, -1.0f, 1.0f);
@@ -857,14 +868,14 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
 
     if (kind == Kind::RemoteWithNunchuk) {
         sample.hasNunchuk = true;
-        if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) sample.hold |= kWpadC;
-        if (SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 0) sample.hold |= kWpadZ;
-        sample.stick[0] = static_cast<float>(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTX)) / 32767.0f;
+        if (aurora_gamepad_button(gamepad, AURORA_GAMEPAD_BUTTON_LEFT_SHOULDER)) sample.hold |= kWpadC;
+        if (aurora_gamepad_axis(gamepad, AURORA_GAMEPAD_AXIS_LEFT_TRIGGER) > 0) sample.hold |= kWpadZ;
+        sample.stick[0] = static_cast<float>(aurora_gamepad_axis(gamepad, AURORA_GAMEPAD_AXIS_LEFTX)) / 32767.0f;
         // SDL's y grows downwards; KPAD's stick y is up-positive.
-        sample.stick[1] = -static_cast<float>(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTY)) / 32767.0f;
+        sample.stick[1] = -static_cast<float>(aurora_gamepad_axis(gamepad, AURORA_GAMEPAD_AXIS_LEFTY)) / 32767.0f;
         for (float& v : sample.stick) v = std::clamp(v, -1.0f, 1.0f);
         LastAcc& lastNunchuk = g_lastNunchukAcc[chan];
-        if (ReadAccelAsKpad(gamepad, SDL_SENSOR_ACCEL_L, sample.nunchukAcc)) {
+        if (ReadAccelAsKpad(gamepad, AURORA_SENSOR_ACCEL_L, sample.nunchukAcc)) {
             lastNunchuk.valid = true;
             for (int i = 0; i < 3; ++i) lastNunchuk.acc[i] = sample.nunchukAcc[i];
         } else {
@@ -887,12 +898,12 @@ bool ReadAccelDebug(uint32_t chan, float sdlG[3], float kpadAcc[3]) {
     (void)kpadAcc;
     return false;
 #else
-    SDL_Gamepad* gamepad = SDL_GetGamepadFromPlayerIndex(static_cast<int>(chan));
+    AuroraGamepad* gamepad = aurora_gamepad_for_player(static_cast<int>(chan));
     if (gamepad == nullptr) {
         return false;
     }
     EnsureSensors(gamepad, chan);
-    if (!ReadAccelG(gamepad, SDL_SENSOR_ACCEL, sdlG)) {
+    if (!ReadAccelG(gamepad, AURORA_SENSOR_ACCEL, sdlG)) {
         return false;
     }
     AccelGToKpad(sdlG, kpadAcc);
