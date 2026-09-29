@@ -603,6 +603,14 @@ static int32_t HandleShaIoctlv(int32_t fd, uint32_t cmd, uint32_t numIn, uint32_
 extern "C" int32_t Stm_HLE_Open(const char* path);
 extern "C" bool Stm_HLE_IsFd(uint32_t fd);
 extern "C" int32_t Stm_HLE_Ioctl(uint32_t fd, uint32_t cmd, uint32_t outBuf, uint32_t outLen);
+// /dev/sdio/slot0 lives in ios/sdio.cpp.
+extern "C" int32_t Sdio_HLE_Open(const char* path);
+extern "C" bool Sdio_HLE_IsFd(uint32_t fd);
+extern "C" int32_t Sdio_HLE_Close(uint32_t fd);
+extern "C" int32_t Sdio_HLE_Ioctl(uint32_t cmd, uint32_t in, uint32_t inLen, uint32_t out,
+                                  uint32_t outLen, uint32_t callback, uint32_t callbackArg,
+                                  bool* held);
+extern "C" int32_t Sdio_HLE_Ioctlv(uint32_t cmd, uint32_t numIn, uint32_t numOut, uint32_t vectorPtr);
 
 extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
     const std::string pathStorage = ReadGuestCString(pathPtr);
@@ -633,6 +641,9 @@ extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
         }
         if (const int32_t stmFd = Stm_HLE_Open(path)) {
             return stmFd;
+        }
+        if (const int32_t sdFd = Sdio_HLE_Open(path)) {
+            return sdFd;
         }
         LogNandWarning("IOS_Open", "unknown device '%s' mode=%u", path, mode);
         return ISFS_ENOENT;
@@ -691,6 +702,9 @@ REGISTER_NATIVE_FUNCTION_AS(0x801938FC, NAND_IOS_OpenBody_HLE_801938FC, "NAND_IO
 extern "C" int32_t NAND_IOS_Close_HLE(uint32_t fd) {
     if (Stm_HLE_IsFd(fd)) {
         return ISFS_OK;
+    }
+    if (Sdio_HLE_IsFd(fd)) {
+        return Sdio_HLE_Close(fd);
     }
     if (fd == ISFS_DEV_FD) {
         return ISFS_OK;
@@ -856,6 +870,9 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
     }
     if (Stm_HLE_IsFd(fd)) {
         return Stm_HLE_Ioctl(fd, cmd, outBufPtr, outLen);
+    }
+    if (Sdio_HLE_IsFd(fd)) {
+        return Sdio_HLE_Ioctl(cmd, inBufPtr, inLen, outBufPtr, outLen, 0, 0, nullptr);
     }
 
     if (GetShaHandle(static_cast<int32_t>(fd))) {
@@ -1459,6 +1476,9 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
 
     if (Network_HLE_IsFd(fd)) {
         return Network_HLE_Ioctlv(fd, cmd, numIn, numOut, vectorPtr);
+    }
+    if (Sdio_HLE_IsFd(fd)) {
+        return Sdio_HLE_Ioctlv(cmd, numIn, numOut, vectorPtr);
     }
 
     if (GetShaHandle(static_cast<int32_t>(fd))) {
