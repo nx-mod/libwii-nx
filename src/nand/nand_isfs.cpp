@@ -75,6 +75,17 @@ static constexpr uint32_t ES_IOCTL_READCONTENT = 0x0A;
 static constexpr uint32_t ES_IOCTL_CLOSECONTENT = 0x0B;
 static constexpr uint32_t ES_IOCTL_SEEKCONTENT = 0x23;
 static constexpr uint32_t ES_IOCTL_OPENTITLECONTENT = 0x24;  // another title's, by id
+// What the Wii Menu reads for every title it lists.
+static constexpr uint32_t ES_IOCTL_GETOWNEDTITLECNT = 0x0C;
+static constexpr uint32_t ES_IOCTL_GETOWNEDTITLES = 0x0D;
+static constexpr uint32_t ES_IOCTL_GETVIEWCNT = 0x12;        // ticket views
+static constexpr uint32_t ES_IOCTL_GETVIEWS = 0x13;
+static constexpr uint32_t ES_IOCTL_GETTMDVIEWCNT = 0x14;     // the TMD view's size
+static constexpr uint32_t ES_IOCTL_GETTMDVIEWS = 0x15;
+static constexpr uint32_t ES_IOCTL_GETSTOREDCONTENTCNT = 0x32;
+static constexpr uint32_t ES_IOCTL_GETSTOREDCONTENTS = 0x33;
+static constexpr uint32_t ES_IOCTL_GETSTOREDTMDSIZE = 0x34;
+static constexpr uint32_t ES_IOCTL_GETSTOREDTMD = 0x35;
 static constexpr int32_t ES_ENOENT = -106;
 static constexpr int32_t ES_EINVAL = -1017;
 static constexpr uint32_t DOLPHIN_IOCTL_GET_ELAPSED_TIME = 0x01;
@@ -203,6 +214,84 @@ static std::vector<uint64_t> InstalledTitles() {
 
 static uint64_t CurrentTitleId() {
     return (static_cast<uint64_t>(CurrentTitleIdHi()) << 32) | CurrentTitleIdLo();
+}
+
+// ============================================================================
+// Title metadata views (ES GetTMDViews / GetViews / GetStoredTMD)
+// ============================================================================
+
+static std::vector<uint8_t> ReadNandFile(const char* wiiPath) {
+    std::ifstream file(TranslateNandPath(wiiPath), std::ios::binary);
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(file)),
+                                std::istreambuf_iterator<char>());
+}
+
+static std::vector<uint8_t> StoredTmd(uint64_t titleId) {
+    char path[64];
+    std::snprintf(path, sizeof(path), "/title/%08x/%08x/content/title.tmd",
+                  static_cast<uint32_t>(titleId >> 32), static_cast<uint32_t>(titleId));
+    std::vector<uint8_t> tmd = ReadNandFile(path);
+    if (tmd.size() < 0x1E4) {
+        return {};
+    }
+    const size_t count = (static_cast<size_t>(tmd[0x1DE]) << 8) | tmd[0x1DF];
+    return tmd.size() >= 0x1E4 + count * 36 ? tmd : std::vector<uint8_t>{};
+}
+
+// A TMD as ES shows it to a title: the header from its version up to the
+// access rights, the title version and content count, then per content its id,
+// index, type and size - no hashes, no signature. 0x5C + 16 per content.
+static std::vector<uint8_t> TmdView(const std::vector<uint8_t>& tmd) {
+    std::vector<uint8_t> view(tmd.begin() + 0x180, tmd.begin() + 0x1D8);
+    view.insert(view.end(), tmd.begin() + 0x1DC, tmd.begin() + 0x1E0);
+    const size_t count = (static_cast<size_t>(tmd[0x1DE]) << 8) | tmd[0x1DF];
+    for (size_t i = 0; i < count; ++i) {
+        const auto record = tmd.begin() + 0x1E4 + i * 36;
+        view.insert(view.end(), record, record + 16);
+    }
+    return view;
+}
+
+static std::vector<uint8_t> StoredTickets(uint64_t titleId) {
+    char path[64];
+    std::snprintf(path, sizeof(path), "/ticket/%08x/%08x.tik",
+                  static_cast<uint32_t>(titleId >> 32), static_cast<uint32_t>(titleId));
+    return ReadNandFile(path);
+}
+
+static constexpr size_t kTicketSize = 0x2A4;
+static constexpr size_t kTicketViewSize = 0xD8;
+
+// A ticket as ES shows it: its version, then everything from the ticket id to
+// the end - never the title key.
+static std::vector<uint8_t> TicketView(const uint8_t* ticket) {
+    std::vector<uint8_t> view{0, 0, 0, ticket[0x1BC]};
+    view.insert(view.end(), ticket + 0x1D0, ticket + kTicketSize);
+    return view;
+}
+
+// Titles with a ticket, which is what "owned" means to ES.
+static std::vector<uint64_t> OwnedTitles() {
+    std::vector<uint64_t> owned;
+    std::error_code ec;
+    const std::filesystem::path root = TranslateNandPath("/ticket");
+    for (const auto& high : std::filesystem::directory_iterator(root, ec)) {
+        std::error_code inner;
+        for (const auto& ticket : std::filesystem::directory_iterator(high.path(), inner)) {
+            const std::string name = ticket.path().filename().string();
+            if (name.size() != 12 || name.substr(8) != ".tik") {
+                continue;
+            }
+            owned.push_back((std::strtoull(high.path().filename().string().c_str(), nullptr, 16) << 32) |
+                            std::strtoul(name.substr(0, 8).c_str(), nullptr, 16));
+        }
+    }
+    std::sort(owned.begin(), owned.end());
+    return owned;
+}
+
+static uint64_t ReadTitleIdVector(uint32_t address) {
+    return (static_cast<uint64_t>(Memory::Read32(address)) << 32) | Memory::Read32(address + 4);
 }
 
 // ============================================================================
@@ -1389,6 +1478,135 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
         }
 
         switch (cmd) {
+            case ES_IOCTL_GETOWNEDTITLECNT:
+            case ES_IOCTL_GETOWNEDTITLES: {
+                const auto owned = OwnedTitles();
+                if (cmd == ES_IOCTL_GETOWNEDTITLECNT) {
+                    const IosVector out = ReadIosVector(vectorPtr, 0);
+                    if (numOut != 1 || out.size < 4 || !Memory::Contains(out.address, 4)) {
+                        return ES_EINVAL;
+                    }
+                    Memory::Write32(out.address, static_cast<uint32_t>(owned.size()));
+                    return ISFS_OK;
+                }
+                const IosVector in = ReadIosVector(vectorPtr, 0);
+                const IosVector out = ReadIosVector(vectorPtr, 1);
+                if (numIn != 1 || numOut != 1 || !Memory::Contains(in.address, 4)) {
+                    return ES_EINVAL;
+                }
+                const uint32_t count = std::min<uint32_t>(Memory::Read32(in.address),
+                                                          static_cast<uint32_t>(owned.size()));
+                if (!IsValidGuestRange(out.address, count * 8u)) {
+                    return ES_EINVAL;
+                }
+                for (uint32_t i = 0; i < count; ++i) {
+                    Memory::Write32(out.address + i * 8, static_cast<uint32_t>(owned[i] >> 32));
+                    Memory::Write32(out.address + i * 8 + 4, static_cast<uint32_t>(owned[i]));
+                }
+                return ISFS_OK;
+            }
+
+            // Ticket views: a title id in, how many (a count out) or the views.
+            case ES_IOCTL_GETVIEWCNT:
+            case ES_IOCTL_GETVIEWS: {
+                const IosVector idIn = ReadIosVector(vectorPtr, 0);
+                if (numIn < 1 || idIn.size < 8 || !Memory::Contains(idIn.address, 8)) {
+                    return ES_EINVAL;
+                }
+                const std::vector<uint8_t> tickets = StoredTickets(ReadTitleIdVector(idIn.address));
+                const uint32_t have = static_cast<uint32_t>(tickets.size() / kTicketSize);
+                if (cmd == ES_IOCTL_GETVIEWCNT) {
+                    const IosVector out = ReadIosVector(vectorPtr, 1);
+                    if (numOut != 1 || out.size < 4 || !Memory::Contains(out.address, 4)) {
+                        return ES_EINVAL;
+                    }
+                    Memory::Write32(out.address, have);
+                    return ISFS_OK;
+                }
+                const IosVector countIn = ReadIosVector(vectorPtr, 1);
+                const IosVector out = ReadIosVector(vectorPtr, 2);
+                if (numIn != 2 || numOut != 1 || !Memory::Contains(countIn.address, 4)) {
+                    return ES_EINVAL;
+                }
+                const uint32_t count = std::min(Memory::Read32(countIn.address), have);
+                if (!IsValidGuestRange(out.address, static_cast<uint32_t>(count * kTicketViewSize))) {
+                    return ES_EINVAL;
+                }
+                for (uint32_t i = 0; i < count; ++i) {
+                    const auto view = TicketView(tickets.data() + i * kTicketSize);
+                    std::memcpy(Memory::GetPointer(out.address + i * kTicketViewSize, kTicketViewSize),
+                                view.data(), kTicketViewSize);
+                }
+                return ISFS_OK;
+            }
+
+            // The TMD view: its size for a title id, then the view itself.
+            case ES_IOCTL_GETTMDVIEWCNT:
+            case ES_IOCTL_GETTMDVIEWS:
+            case ES_IOCTL_GETSTOREDTMDSIZE:
+            case ES_IOCTL_GETSTOREDTMD: {
+                const IosVector idIn = ReadIosVector(vectorPtr, 0);
+                if (numIn < 1 || idIn.size < 8 || !Memory::Contains(idIn.address, 8)) {
+                    return ES_EINVAL;
+                }
+                const uint64_t titleId = ReadTitleIdVector(idIn.address);
+                const std::vector<uint8_t> tmd = StoredTmd(titleId);
+                if (tmd.empty()) {
+                    LogNandWarning("ES", "no TMD for title %016llx (cmd 0x%02x)",
+                                   static_cast<unsigned long long>(titleId), cmd);
+                    return ES_ENOENT;
+                }
+                const bool whole = cmd == ES_IOCTL_GETSTOREDTMDSIZE || cmd == ES_IOCTL_GETSTOREDTMD;
+                const std::vector<uint8_t> bytes = whole ? tmd : TmdView(tmd);
+                if (cmd == ES_IOCTL_GETTMDVIEWCNT || cmd == ES_IOCTL_GETSTOREDTMDSIZE) {
+                    const IosVector out = ReadIosVector(vectorPtr, 1);
+                    if (numOut != 1 || out.size < 4 || !Memory::Contains(out.address, 4)) {
+                        return ES_EINVAL;
+                    }
+                    Memory::Write32(out.address, static_cast<uint32_t>(bytes.size()));
+                    return ISFS_OK;
+                }
+                const IosVector out = ReadIosVector(vectorPtr, numIn);
+                if (numOut != 1 || out.size < bytes.size() ||
+                    !WriteGuestBytes(out.address, out.size, bytes.data(), bytes.size())) {
+                    return ES_EINVAL;
+                }
+                return ISFS_OK;
+            }
+
+            // The contents of a title that are really in the NAND: same as
+            // GetTitleContents, asked by id alone.
+            case ES_IOCTL_GETSTOREDCONTENTCNT:
+            case ES_IOCTL_GETSTOREDCONTENTS: {
+                const IosVector idIn = ReadIosVector(vectorPtr, 0);
+                if (numIn < 1 || !Memory::Contains(idIn.address, 8)) {
+                    return ES_EINVAL;
+                }
+                const auto contents = StoredContents(ReadTitleIdVector(idIn.address));
+                if (cmd == ES_IOCTL_GETSTOREDCONTENTCNT) {
+                    const IosVector out = ReadIosVector(vectorPtr, 1);
+                    if (numOut != 1 || !Memory::Contains(out.address, 4)) {
+                        return ES_EINVAL;
+                    }
+                    Memory::Write32(out.address, static_cast<uint32_t>(contents.size()));
+                    return ISFS_OK;
+                }
+                const IosVector countIn = ReadIosVector(vectorPtr, 1);
+                const IosVector out = ReadIosVector(vectorPtr, 2);
+                if (numIn != 2 || numOut != 1 || !Memory::Contains(countIn.address, 4)) {
+                    return ES_EINVAL;
+                }
+                const uint32_t count = std::min<uint32_t>(Memory::Read32(countIn.address),
+                                                          static_cast<uint32_t>(contents.size()));
+                if (!IsValidGuestRange(out.address, count * 4u)) {
+                    return ES_EINVAL;
+                }
+                for (uint32_t i = 0; i < count; ++i) {
+                    Memory::Write32(out.address + i * 4, contents[i]);
+                }
+                return ISFS_OK;
+            }
+
             case ES_IOCTL_OPENCONTENT: {
                 if (numIn != 1) {
                     return ES_EINVAL;
