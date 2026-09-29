@@ -69,6 +69,14 @@ static constexpr uint32_t ES_IOCTL_GETTITLEDIR = 0x1D;
 static constexpr uint32_t ES_IOCTL_GETDEVICECERT = 0x1E;
 static constexpr uint32_t ES_IOCTL_GETTITLEID = 0x20;
 static constexpr uint32_t ES_IOCTL_SIGN = 0x30;
+// A title's own contents, read the way the SDK's CNT library reads them.
+static constexpr uint32_t ES_IOCTL_OPENCONTENT = 0x09;       // index of the running title
+static constexpr uint32_t ES_IOCTL_READCONTENT = 0x0A;
+static constexpr uint32_t ES_IOCTL_CLOSECONTENT = 0x0B;
+static constexpr uint32_t ES_IOCTL_SEEKCONTENT = 0x23;
+static constexpr uint32_t ES_IOCTL_OPENTITLECONTENT = 0x24;  // another title's, by id
+static constexpr int32_t ES_ENOENT = -106;
+static constexpr int32_t ES_EINVAL = -1017;
 static constexpr uint32_t DOLPHIN_IOCTL_GET_ELAPSED_TIME = 0x01;
 static constexpr uint32_t DOLPHIN_IOCTL_GET_VERSION = 0x02;
 static constexpr uint32_t DOLPHIN_IOCTL_GET_SPEED_LIMIT = 0x03;
@@ -193,9 +201,68 @@ static std::vector<uint64_t> InstalledTitles() {
     return titles;
 }
 
-static uint64_t CurrentMkwTitleId() {
-    uint32_t low = CurrentMkwTitleIdLo();
-    return (static_cast<uint64_t>(kNandTitleIdHi) << 32) | low;
+static uint64_t CurrentTitleId() {
+    return (static_cast<uint64_t>(CurrentTitleIdHi()) << 32) | CurrentTitleIdLo();
+}
+
+// ============================================================================
+// Title contents (ES OpenContent / ReadContent / SeekContent / CloseContent)
+// ============================================================================
+
+// Content fds are ES's own small numbers, as on a console; sixteen at once.
+static constexpr int kMaxContentFds = 16;
+static std::FILE* g_contentFiles[kMaxContentFds] = {};
+
+// The host file of content `index` (its TMD index, not its id) of a title:
+// the title's own folder, or /shared1 through the map when it is shared -
+// TranslateNandPath does that part.
+static std::filesystem::path ContentHostPath(uint64_t titleId, uint32_t index) {
+    char tmdPath[64];
+    std::snprintf(tmdPath, sizeof(tmdPath), "/title/%08x/%08x/content/title.tmd",
+                  static_cast<uint32_t>(titleId >> 32), static_cast<uint32_t>(titleId));
+    std::ifstream tmdFile(TranslateNandPath(tmdPath), std::ios::binary);
+    const std::vector<uint8_t> tmd((std::istreambuf_iterator<char>(tmdFile)),
+                                   std::istreambuf_iterator<char>());
+    if (tmd.size() < 0x1E4) {
+        return {};
+    }
+    const size_t count = (static_cast<size_t>(tmd[0x1DE]) << 8) | tmd[0x1DF];
+    for (size_t i = 0; i < count && 0x1E4 + (i + 1) * 36 <= tmd.size(); ++i) {
+        const uint8_t* record = tmd.data() + 0x1E4 + i * 36;
+        if (((static_cast<uint32_t>(record[4]) << 8) | record[5]) != index) {
+            continue;
+        }
+        const uint32_t id = (static_cast<uint32_t>(record[0]) << 24) | (record[1] << 16) |
+                            (record[2] << 8) | record[3];
+        char appPath[64];
+        std::snprintf(appPath, sizeof(appPath), "/title/%08x/%08x/content/%08x.app",
+                      static_cast<uint32_t>(titleId >> 32), static_cast<uint32_t>(titleId), id);
+        return TranslateNandPath(appPath);
+    }
+    return {};
+}
+
+static int32_t OpenTitleContent(uint64_t titleId, uint32_t index) {
+    const std::filesystem::path path = ContentHostPath(titleId, index);
+    std::FILE* file = path.empty() ? nullptr : std::fopen(path.string().c_str(), "rb");
+    if (file == nullptr) {
+        LogNandWarning("ES_OpenContent", "title %016llx content index %u is not in the NAND",
+                       static_cast<unsigned long long>(titleId), index);
+        return ES_ENOENT;
+    }
+    for (int cfd = 0; cfd < kMaxContentFds; ++cfd) {
+        if (g_contentFiles[cfd] == nullptr) {
+            g_contentFiles[cfd] = file;
+            return cfd;
+        }
+    }
+    std::fclose(file);
+    LogNandWarning("ES_OpenContent", "all %d content fds are open", kMaxContentFds);
+    return ES_EINVAL;
+}
+
+static std::FILE* ContentFile(uint32_t cfd) {
+    return cfd < static_cast<uint32_t>(kMaxContentFds) ? g_contentFiles[cfd] : nullptr;
 }
 
 static bool WriteGuestBytes(uint32_t address, uint32_t size, const uint8_t* data, size_t dataSize) {
@@ -1058,9 +1125,9 @@ int32_t ISFS_OpenLib_Initialize(CpuContext* ctx) {
     
     // Create the title data directory if it doesn't exist
     char titleId[32];
-    std::snprintf(titleId, sizeof(titleId), "%08x", kNandTitleIdHi);
+    std::snprintf(titleId, sizeof(titleId), "%08x", CurrentTitleIdHi());
     char gameId[32];
-    std::snprintf(gameId, sizeof(gameId), "%08x", CurrentMkwTitleIdLo());
+    std::snprintf(gameId, sizeof(gameId), "%08x", CurrentTitleIdLo());
     CreateDirectoryPath(GetNandBasePath() / "title" / titleId / gameId / "data");
 
     if (!ctx) {
@@ -1322,6 +1389,94 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
         }
 
         switch (cmd) {
+            case ES_IOCTL_OPENCONTENT: {
+                if (numIn != 1) {
+                    return ES_EINVAL;
+                }
+                const IosVector in = ReadIosVector(vectorPtr, 0);
+                if (in.size < 4 || !Memory::Contains(in.address, 4)) {
+                    return ES_EINVAL;
+                }
+                return OpenTitleContent(CurrentTitleId(), Memory::Read32(in.address));
+            }
+
+            case ES_IOCTL_OPENTITLECONTENT: {
+                if (numIn != 3) {
+                    return ES_EINVAL;
+                }
+                const IosVector idIn = ReadIosVector(vectorPtr, 0);
+                const IosVector indexIn = ReadIosVector(vectorPtr, 2);
+                if (idIn.size < 8 || !Memory::Contains(idIn.address, 8) ||
+                    indexIn.size < 4 || !Memory::Contains(indexIn.address, 4)) {
+                    return ES_EINVAL;
+                }
+                const uint64_t titleId =
+                    (static_cast<uint64_t>(Memory::Read32(idIn.address)) << 32) |
+                    Memory::Read32(idIn.address + 4);
+                return OpenTitleContent(titleId, Memory::Read32(indexIn.address));
+            }
+
+            case ES_IOCTL_READCONTENT: {
+                if (numIn != 1 || numOut != 1) {
+                    return ES_EINVAL;
+                }
+                const IosVector in = ReadIosVector(vectorPtr, 0);
+                const IosVector out = ReadIosVector(vectorPtr, 1);
+                if (in.size < 4 || !Memory::Contains(in.address, 4) || !IsValidGuestRange(out.address, out.size)) {
+                    return ES_EINVAL;
+                }
+                std::FILE* file = ContentFile(Memory::Read32(in.address));
+                if (file == nullptr) {
+                    return ES_EINVAL;
+                }
+                if (out.size == 0) {
+                    return 0;
+                }
+                return static_cast<int32_t>(
+                    std::fread(Memory::GetPointer(out.address, out.size), 1, out.size, file));
+            }
+
+            case ES_IOCTL_SEEKCONTENT: {
+                if (numIn != 3) {
+                    return ES_EINVAL;
+                }
+                const IosVector cfdIn = ReadIosVector(vectorPtr, 0);
+                const IosVector offsetIn = ReadIosVector(vectorPtr, 1);
+                const IosVector whenceIn = ReadIosVector(vectorPtr, 2);
+                if (!Memory::Contains(cfdIn.address, 4) || !Memory::Contains(offsetIn.address, 4) ||
+                    !Memory::Contains(whenceIn.address, 4)) {
+                    return ES_EINVAL;
+                }
+                std::FILE* file = ContentFile(Memory::Read32(cfdIn.address));
+                const uint32_t whence = Memory::Read32(whenceIn.address);  // 0 set, 1 current, 2 end
+                if (file == nullptr || whence > 2) {
+                    return ES_EINVAL;
+                }
+                const int origin = whence == 0 ? SEEK_SET : whence == 1 ? SEEK_CUR : SEEK_END;
+                if (std::fseek(file, static_cast<int32_t>(Memory::Read32(offsetIn.address)), origin) != 0) {
+                    return ES_EINVAL;
+                }
+                return static_cast<int32_t>(std::ftell(file));
+            }
+
+            case ES_IOCTL_CLOSECONTENT: {
+                if (numIn != 1) {
+                    return ES_EINVAL;
+                }
+                const IosVector in = ReadIosVector(vectorPtr, 0);
+                if (!Memory::Contains(in.address, 4)) {
+                    return ES_EINVAL;
+                }
+                const uint32_t cfd = Memory::Read32(in.address);
+                std::FILE* file = ContentFile(cfd);
+                if (file == nullptr) {
+                    return ES_EINVAL;
+                }
+                std::fclose(file);
+                g_contentFiles[cfd] = nullptr;
+                return ISFS_OK;
+            }
+
             case ES_IOCTL_GETDEVICEID: {
                 if (numIn != 0 || numOut != 1) {
                     return ISFS_EINVAL;
@@ -1473,7 +1628,7 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
                 if (out.size < 8 || out.address == 0 || !Memory::Contains(out.address, 8)) {
                     return ISFS_EINVAL;
                 }
-                const uint64_t titleId = CurrentMkwTitleId();
+                const uint64_t titleId = CurrentTitleId();
                 Memory::Write32(out.address, static_cast<uint32_t>(titleId >> 32));
                 Memory::Write32(out.address + 4u, static_cast<uint32_t>(titleId));
                 return ISFS_OK;
@@ -1492,7 +1647,7 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
                 const uint8_t* input = Memory::GetPointer(in.address, in.size);
                 WiiEsCrypto::EcSignature signature{};
                 WiiEsCrypto::EccCert cert{};
-                WiiEsCrypto::Sign(CurrentMkwTitleId(), input, in.size, signature, cert);
+                WiiEsCrypto::Sign(CurrentTitleId(), input, in.size, signature, cert);
                 if (!WriteGuestBytes(sigOut.address, sigOut.size, signature.data(), signature.size()) ||
                     !WriteGuestBytes(certOut.address, certOut.size, cert.data(), cert.size())) {
                     return ISFS_EINVAL;

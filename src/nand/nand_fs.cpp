@@ -1,6 +1,7 @@
 // NAND/ISFS HLE: redirects Wii NAND paths (e.g. /title/00010004/524d4350/data/rksys.dat) to
 // <nand_root>\title\00010004\524d4350\data\rksys.dat on the host.
 
+#include "generated/RuntimeConfig.h"
 #include "nand_internal.h"
 
 #include <set>
@@ -127,14 +128,26 @@ void CloseFd(int32_t fd) {
 // Path Translation
 // ============================================================================
 
-uint32_t CurrentMkwTitleIdLo() {
+uint32_t CurrentTitleIdHi() {
+#if defined(RUNTIME_CONFIG_HAS_TITLE_ID)
+    return RuntimeConfig::TITLE_ID_HI;
+#else
+    return kNandTitleIdHi;
+#endif
+}
+
+uint32_t CurrentTitleIdLo() {
+#if defined(RUNTIME_CONFIG_HAS_TITLE_ID)
+    return RuntimeConfig::TITLE_ID_LO;
+#else
     return RuntimeHle::CurrentGameCode(kNandTitleIdLo);
+#endif
 }
 
 std::string CurrentNandDataDir() {
     char path[64];
     std::snprintf(path, sizeof(path), "/title/%08x/%08x/data",
-                  kNandTitleIdHi, CurrentMkwTitleIdLo());
+                  CurrentTitleIdHi(), CurrentTitleIdLo());
     return path;
 }
 
