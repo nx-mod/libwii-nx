@@ -420,6 +420,31 @@ extern "C" int32_t NANDCreateDir_HLE(uint32_t pathPtr, uint32_t perm, uint32_t a
 }
 PPC_NATIVE_OVERRIDE(8019BBE0, NANDCreateDir_HLE, int32_t, (uint32_t pathPtr, uint32_t perm, uint32_t attr), (pathPtr, perm, attr));
 
+// A Riivolution save redirect can put the destination on another filesystem
+// from the guest's /tmp, where rename fails. Copy a regular file beside the
+// destination, publish it with a same-filesystem rename, then drop the source:
+// readers never see half a file, and on failure the source is still there.
+// (From upstream WiiCompiled's fix/fix-nand-cross-device-move.)
+static void MoveAcrossFilesystems(const std::filesystem::path& source,
+                                  const std::filesystem::path& destination,
+                                  std::error_code& ec) {
+    namespace fs = std::filesystem;
+    if (!fs::is_regular_file(fs::symlink_status(source, ec)) || ec) {
+        if (!ec) ec = std::make_error_code(std::errc::cross_device_link);
+        return;
+    }
+    const fs::path staged = destination.parent_path() / (".nand-move-" + destination.filename().string());
+    fs::remove(staged, ec);
+    fs::copy_file(source, staged, fs::copy_options::none, ec);
+    if (!ec) fs::rename(staged, destination, ec);
+    if (!ec) {
+        fs::remove(source, ec);
+        return;
+    }
+    std::error_code ignored;
+    fs::remove(staged, ignored);
+}
+
 extern "C" int32_t NANDMove_HLE(uint32_t srcPathPtr, uint32_t dstPathPtr) {
     NandTraceCall("NANDMove", "%s", srcPathPtr ? (const char*)Memory::GetPointer(srcPathPtr) : "(null)");
     const char* srcPath = srcPathPtr ? (const char*)Memory::GetPointer(srcPathPtr) : nullptr;
@@ -453,6 +478,9 @@ extern "C" int32_t NANDMove_HLE(uint32_t srcPathPtr, uint32_t dstPathPtr) {
 
     std::error_code ec;
     std::filesystem::rename(srcHost, dstHost, ec);
+    if (ec == std::errc::cross_device_link) {
+        MoveAcrossFilesystems(srcHost, dstHost, ec);
+    }
     if (!ec) {
         return NAND_RESULT_OK;
     }
