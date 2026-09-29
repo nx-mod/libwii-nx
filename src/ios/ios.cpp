@@ -24,7 +24,11 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(uint32_t fd, uint32_t cmd, uint32_t inBufP
 extern "C" int32_t NAND_IOS_Ioctlv_HLE(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut,
                                        uint32_t vectorPtr);
 
-extern "C" uint32_t OSResetSystem();  // libdol-nx os_reset.cpp: stops audio, exits cleanly
+extern "C" uint32_t OSResetSystem();
+extern "C" bool Sdio_HLE_IsFd(uint32_t fd);
+extern "C" int32_t Sdio_HLE_Ioctl(uint32_t cmd, uint32_t in, uint32_t inLen, uint32_t out,
+                                  uint32_t outLen, uint32_t callback, uint32_t callbackArg,
+                                  bool* held);  // libdol-nx os_reset.cpp: stops audio, exits cleanly
 
 // ============================================================================
 // /dev/stm: power and reset
@@ -180,6 +184,18 @@ extern "C" void IOS_IoctlAsync_80194158(CpuContext* ctx)
         return;
     }
 
+    if (Sdio_HLE_IsFd(fd)) {
+        // An SD event registration is answered when it is true, not now.
+        bool held = false;
+        const int32_t result =
+            Sdio_HLE_Ioctl(cmd, inBuf, inLen, outBuf, outLen, callback, callbackArg, &held);
+        if (held) {
+            SetIosReturn(ctx, 0);
+        } else {
+            CompleteAsync(ctx, callback, result, callbackArg);
+        }
+        return;
+    }
     if (fd == kStmEventHookFd && cmd == kStmEventHook) {
         g_stmHookCallback = callback;
         g_stmHookArg = callbackArg;
