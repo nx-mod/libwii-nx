@@ -8,3 +8,6 @@ sends a request to IOS over IPC and waits. `ios.cpp` is that channel, and
 
 A GameCube has none of this - a GameCube game owns the machine - which is why
 these are here and not in libdol-nx.
+
+Devices answered: ES (`esp.cpp`), `/dev/stm`, `/dev/sdio/slot0` (`sdio.cpp`),
+`/dev/di` (`di.cpp`), the network devices, and the NAND's own (`../nand`).
