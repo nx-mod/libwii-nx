@@ -510,11 +510,17 @@ extern "C" int32_t NANDGetStatus_HLE(uint32_t pathPtr, uint32_t outStatusPtr) {
         return NAND_RESULT_NOEXISTS;
     }
     
-    // NANDStatus structure - fill with fake values
-    // This is typically used to check permissions and file type
-    Memory::Write32(outStatusPtr, 0);      // Magic/type
-    Memory::Write32(outStatusPtr + 4, 0);  // Permissions  
-    
+    // NANDStatus: owner id, group id, attribute, then the permissions packed
+    // as owner << 4 | group << 2 | other - what IOS keeps for the entry, which
+    // a caller reads back and hands to NANDSetStatus with one field changed
+    const NandMetadata meta = NandGetMetadata(NandAbsolutePath(path));
+    Memory::Write32(outStatusPtr + 0, meta.uid);
+    Memory::Write16(outStatusPtr + 4, meta.gid);
+    Memory::Write8(outStatusPtr + 6, meta.attribute);
+    Memory::Write8(outStatusPtr + 7, static_cast<uint8_t>((meta.ownerMode & 3) << 4 |
+                                                          (meta.groupMode & 3) << 2 |
+                                                          (meta.otherMode & 3)));
+
     return NAND_RESULT_OK;
 }
 PPC_NATIVE_OVERRIDE(8019C380, NANDGetStatus_HLE, int32_t, (uint32_t pathPtr, uint32_t outStatusPtr), (pathPtr, outStatusPtr));

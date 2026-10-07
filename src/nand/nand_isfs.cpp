@@ -1063,12 +1063,9 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
             }
             
             case ISFS_IOCTL_SETATTR: {
-                // Nothing here keeps ownership or permissions, so there is
-                // nowhere to put these. Refusing would be worse: a title that
-                // cannot set the attributes on a save it just wrote treats that
-                // as a failed save. Accepting and saying so is the honest
-                // middle - and the input is still checked, so a malformed
-                // request is answered as malformed rather than as success.
+                // Kept in the metadata store, which GetAttr and NANDGetStatus
+                // read back. The input is checked, so a malformed request is
+                // answered as malformed rather than as success.
                 if (!inBufPtr || inLen < 0x4a || !Memory::Contains(inBufPtr, 0x4a)) {
                     return ISFS_EINVAL;
                 }

@@ -255,6 +255,8 @@ static std::string NormalizeAbsoluteWiiPath(const char* wiiPath) {
     return path;
 }
 
+std::string NandAbsolutePath(const char* wiiPath) { return NormalizeAbsoluteWiiPath(wiiPath); }
+
 struct RiivolutionSaveRedirect {
     bool enabled = false;
     bool clone = false;

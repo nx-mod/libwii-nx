@@ -165,6 +165,9 @@ struct NandMetadata {
 };
 
 NandMetadata NandGetMetadata(const std::string& wiiPath);
+// a path as the title gave it (relative ones to its current directory), as
+// the metadata store keys it
+std::string NandAbsolutePath(const char* wiiPath);
 void NandSetMetadata(const std::string& wiiPath, const NandMetadata& meta);
 
 // Create the directory that contains `path`. False when `path` has no directory
