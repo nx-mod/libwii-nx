@@ -26,6 +26,11 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(uint32_t fd, uint32_t cmd, uint32_t numIn
 
 extern "C" void RuntimeLeave(bool restart);  // libdol-nx os_reset.cpp: power off closes, reset restarts
 extern "C" bool Sdio_HLE_IsFd(uint32_t fd);
+extern "C" bool Di_HLE_IsFd(uint32_t fd);
+extern "C" int32_t Di_HLE_Ioctl(uint32_t cmd, uint32_t in, uint32_t inLen, uint32_t out,
+                                uint32_t outLen, bool* held);
+void NandDispatchIosCallbackNow(CpuContext* cpu, uint32_t callbackPtr, int32_t result,
+                                uint32_t callbackArg);
 extern "C" int32_t Sdio_HLE_Ioctl(uint32_t cmd, uint32_t in, uint32_t inLen, uint32_t out,
                                   uint32_t outLen, uint32_t callback, uint32_t callbackArg,
                                   bool* held);  // libdol-nx os_reset.cpp: stops audio, exits cleanly
@@ -193,6 +198,16 @@ extern "C" void IOS_IoctlAsync_80194158(CpuContext* ctx)
         } else {
             CompleteAsync(ctx, callback, result, callbackArg);
         }
+        return;
+    }
+    if (Di_HLE_IsFd(fd)) {
+        // answered now, callback included (see NandDispatchIosCallbackNow)
+        bool held = false;
+        const int32_t result = Di_HLE_Ioctl(cmd, inBuf, inLen, outBuf, outLen, &held);
+        if (!held) {
+            NandDispatchIosCallbackNow(ctx, callback, result, callbackArg);
+        }
+        SetIosReturn(ctx, 0);
         return;
     }
     if (fd == kStmEventHookFd && cmd == kStmEventHook) {

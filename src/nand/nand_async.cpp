@@ -62,6 +62,15 @@ void NandQueueIosCallback(uint32_t callbackPtr, int32_t result, uint32_t callbac
     InvokeNandCallback(callbackPtr, result, callbackArg);
 }
 
+// A completion delivered at once, before the async call returns, for a device
+// whose callers busy-wait on what the callback sets (the DVD low-level
+// library spins on a flag with no call in its loop, so a queued completion,
+// drained only from the alarm pump, would never arrive).
+void NandDispatchIosCallbackNow(CpuContext* cpu, uint32_t callbackPtr, int32_t result,
+                                uint32_t callbackArg) {
+    DispatchNandCallback(cpu, callbackPtr, result, callbackArg);
+}
+
 // Guest NAND callbacks can re-enter this drain: RFL's hidden-Mii loader chains one async
 // load per Mii as its own completion callback, and a database fattened by online play
 // nested hundreds of frames deep and crashed at boot. Hardware is iterative via the IPC

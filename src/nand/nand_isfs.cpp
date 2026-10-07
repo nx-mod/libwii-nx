@@ -605,6 +605,10 @@ extern "C" bool Stm_HLE_IsFd(uint32_t fd);
 extern "C" int32_t Stm_HLE_Ioctl(uint32_t fd, uint32_t cmd, uint32_t outBuf, uint32_t outLen);
 // /dev/sdio/slot0 lives in ios/sdio.cpp.
 extern "C" int32_t Sdio_HLE_Open(const char* path);
+extern "C" int32_t Di_HLE_Open(const char* path);
+extern "C" bool Di_HLE_IsFd(uint32_t fd);
+extern "C" int32_t Di_HLE_Ioctl(uint32_t cmd, uint32_t in, uint32_t inLen, uint32_t out,
+                                uint32_t outLen, bool* held);
 extern "C" bool Sdio_HLE_IsFd(uint32_t fd);
 extern "C" int32_t Sdio_HLE_Close(uint32_t fd);
 extern "C" int32_t Sdio_HLE_Ioctl(uint32_t cmd, uint32_t in, uint32_t inLen, uint32_t out,
@@ -644,6 +648,9 @@ extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
         }
         if (const int32_t sdFd = Sdio_HLE_Open(path)) {
             return sdFd;
+        }
+        if (const int32_t diFd = Di_HLE_Open(path)) {
+            return diFd;
         }
         LogNandWarning("IOS_Open", "unknown device '%s' mode=%u", path, mode);
         return ISFS_ENOENT;
@@ -705,6 +712,9 @@ extern "C" int32_t NAND_IOS_Close_HLE(uint32_t fd) {
     }
     if (Sdio_HLE_IsFd(fd)) {
         return Sdio_HLE_Close(fd);
+    }
+    if (Di_HLE_IsFd(fd)) {
+        return ISFS_OK;
     }
     if (fd == ISFS_DEV_FD) {
         return ISFS_OK;
@@ -873,6 +883,9 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
     }
     if (Sdio_HLE_IsFd(fd)) {
         return Sdio_HLE_Ioctl(cmd, inBufPtr, inLen, outBufPtr, outLen, 0, 0, nullptr);
+    }
+    if (Di_HLE_IsFd(fd)) {
+        return Di_HLE_Ioctl(cmd, inBufPtr, inLen, outBufPtr, outLen, nullptr);
     }
 
     if (GetShaHandle(static_cast<int32_t>(fd))) {
