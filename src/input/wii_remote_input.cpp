@@ -178,6 +178,10 @@ bool NameContains(const char* name, const char* needle) {
     return name != nullptr && std::strstr(name, needle) != nullptr;
 }
 
+#if !defined(__SWITCH__)
+// (Aurora's gamepads and their sensors: the desktop's remotes, through SDL.
+// The Switch reads native input and has no motion mapping yet.)
+
 // Turns on the remote (and Nunchuk) accelerometers once per gamepad instance.
 void EnsureSensors(AuroraGamepad* gamepad, uint32_t port) {
     const AuroraControllerID id = aurora_gamepad_id(gamepad);
@@ -283,6 +287,7 @@ bool ReadAccelAsKpad(AuroraGamepad* gamepad, AuroraSensorType sensor, float* kpa
     AccelGToKpad(g, kpad);
     return true;
 }
+#endif  // !__SWITCH__
 
 // Debug trace of every remote sample (controller.wii_accel_trace = true):
 // milliseconds, port, WPAD hold bits, the uncorrected SDL sample in g and the
@@ -326,6 +331,7 @@ void FinishAccelCalibration(const char* message) {
     RT_LOG(RT_TAG_CONFIG) << "Wii Remote accelerometer calibration: " << message << std::endl;
 }
 
+#if !defined(__SWITCH__)
 // One frame of a calibration run: accumulates the uncorrected sample and, once
 // enough frames are in, stores the mean minus the ideal rest vector (0, 1, 0).
 void StepAccelCalibration() {
@@ -378,6 +384,7 @@ void StepAccelCalibration() {
                   offset[2]);
     FinishAccelCalibration(message);
 }
+#endif  // !__SWITCH__
 
 // True when any controller aurora knows about is a Wii device.
 bool AnyWiiControllerConnected() {
