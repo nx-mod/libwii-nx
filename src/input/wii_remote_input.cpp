@@ -9,6 +9,7 @@
 // Switch reads its controllers from libnx; desktop reaches Wii Remotes through
 // SDL's HIDAPI driver.
 #if defined(__SWITCH__)
+#include "native_input.h"
 #include <switch.h>
 #else
 #include <SDL3/SDL_gamepad.h>
@@ -89,45 +90,14 @@ constexpr uint64_t kExtensionSwapGraceMs = 3000;
 constexpr uint64_t kScanStartDelayMs = 3000;
 
 #if defined(__SWITCH__)
-// SDL has no Switch backend (see switch_stubs_dev.cpp), so real controller
-// input here goes straight through libnx instead. Every connected pad is
-// reported as a Wii Remote + Classic Controller: the broadest, most direct
-// mapping (Switch and the Classic Controller already share the same face
-// button layout - A right, B down, X up, Y left), sidestepping Wii Remote
-// tilt/motion "Wii Wheel" emulation, which would need a physical steering
-// metaphor with no equivalent already proven on this target. A real Joy-Con
-// or Pro Controller's own accelerometer could drive that later; libnx's
-// hidGetSixAxisSensorStates gives access to it, just not wired up yet.
-std::array<PadState, PAD_MAX_CONTROLLERS> g_switchPads{};
-std::array<bool, PAD_MAX_CONTROLLERS> g_switchPadReady{};
-bool g_switchPadConfigured = false;
-
-// Lazily configures and updates the PadState for `chan`, one per game port
-// (HidNpadIdType_No1..No4), and returns its freshly-updated state.
-PadState& EnsureSwitchPad(uint32_t chan) {
-    if (!g_switchPadConfigured) {
-        padConfigureInput(PAD_MAX_CONTROLLERS, HidNpadStyleSet_NpadFullCtrl);
-        g_switchPadConfigured = true;
-    }
-    PadState& pad = g_switchPads[chan];
-    if (!g_switchPadReady[chan]) {
-        // Port 1 must also listen on HidNpadIdType_Handheld: undocked, the
-        // built-in Joy-Cons report there and not as No1, so binding No1 alone
-        // left handheld play with no controller at all.
-        uint64_t mask = 1UL << (HidNpadIdType_No1 + chan);
-        if (chan == 0) {
-            mask |= 1UL << HidNpadIdType_Handheld;
-        }
-        padInitializeWithMask(&pad, mask);
-        g_switchPadReady[chan] = true;
-    }
-    padUpdate(&pad);
-    return pad;
-}
-
+// The Switch reads its controllers once a frame in libdol-nx's native input
+// (native_input.h); every connected pad is reported as a Wii Remote + Classic
+// Controller, the broadest and most direct mapping (the two share a face
+// button layout). The pads' accelerometers are there for a Remote + Nunchuk
+// mode with motion, next.
 // Same digital "was the physical L/R shoulder held" trigger reporting the SDL
 // path uses (SDL only ever exposes L/R as a click, never as an analog pull).
-uint8_t SwitchTrigger(uint64_t buttons, HidNpadButton button) {
+uint8_t SwitchTrigger(uint32_t buttons, uint32_t button) {
     return (buttons & button) ? 255 : 0;
 }
 
@@ -495,7 +465,7 @@ void FinishRescan(uint64_t now) {
 void ConfigureSdlHints(bool enabled) {
 #if defined(__SWITCH__)
     // No SDL Wii driver on Switch to configure; real controllers are read
-    // straight through libnx (see EnsureSwitchPad).
+    // straight through libnx (libdol-nx native_input.h).
     (void)enabled;
     return;
 #else
@@ -641,7 +611,8 @@ Kind KindForName(const char* name) {
 Kind KindForPort(uint32_t port) {
     if (port >= PAD_MAX_CONTROLLERS) return Kind::NotWii;
 #if defined(__SWITCH__)
-    return padIsConnected(&EnsureSwitchPad(port)) ? Kind::RemoteWithClassic : Kind::NotWii;
+    return dol::input::state(static_cast<int>(port)).style != dol::input::Style::None ? Kind::RemoteWithClassic
+                                                                                       : Kind::NotWii;
 #else
     AuroraGamepad* gamepad = aurora_gamepad_for_player(static_cast<int>(port));
     if (gamepad == nullptr) return Kind::NotWii;
@@ -736,8 +707,8 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
         return false;
     }
 #if defined(__SWITCH__)
-    PadState& pad = EnsureSwitchPad(chan);
-    if (!padIsConnected(&pad)) {
+    const dol::input::State& pad = dol::input::state(static_cast<int>(chan));
+    if (pad.style == dol::input::Style::None) {
         return false;
     }
     sample = {};
@@ -746,37 +717,37 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
     sample.acc[1] = -1.0f;
     sample.hasClassic = true;
 
-    const uint64_t buttons = padGetButtons(&pad);
-    const auto cl = [&](HidNpadButton button, uint32_t bit) {
+    // (dol::input's buttons are positional: East is A, South B, North X, West Y)
+    const uint32_t buttons = pad.buttons;
+    const auto cl = [&](uint32_t button, uint32_t bit) {
         if (buttons & button) sample.clHold |= bit;
     };
-    cl(HidNpadButton_A, kClA);
-    cl(HidNpadButton_B, kClB);
-    cl(HidNpadButton_X, kClX);
-    cl(HidNpadButton_Y, kClY);
-    cl(HidNpadButton_Plus, kClPlus);
-    cl(HidNpadButton_Minus, kClMinus);
-    cl(HidNpadButton_L, kClL);
-    cl(HidNpadButton_R, kClR);
-    cl(HidNpadButton_ZL, kClZL);
-    cl(HidNpadButton_ZR, kClZR);
-    cl(HidNpadButton_Up, kClUp);
-    cl(HidNpadButton_Down, kClDown);
-    cl(HidNpadButton_Left, kClLeft);
-    cl(HidNpadButton_Right, kClRight);
+    cl(dol::input::ButtonEast, kClA);
+    cl(dol::input::ButtonSouth, kClB);
+    cl(dol::input::ButtonNorth, kClX);
+    cl(dol::input::ButtonWest, kClY);
+    cl(dol::input::ButtonPlus, kClPlus);
+    cl(dol::input::ButtonMinus, kClMinus);
+    cl(dol::input::ButtonL, kClL);
+    cl(dol::input::ButtonR, kClR);
+    cl(dol::input::ButtonZL, kClZL);
+    cl(dol::input::ButtonZR, kClZR);
+    cl(dol::input::ButtonDpadUp, kClUp);
+    cl(dol::input::ButtonDpadDown, kClDown);
+    cl(dol::input::ButtonDpadLeft, kClLeft);
+    cl(dol::input::ButtonDpadRight, kClRight);
 
-    const HidAnalogStickState left = padGetStickPos(&pad, 0);
-    const HidAnalogStickState right = padGetStickPos(&pad, 1);
-    sample.clLStick[0] = SwitchStickAxis(left.x);
-    sample.clLStick[1] = SwitchStickAxis(left.y);
-    sample.clRStick[0] = SwitchStickAxis(right.x);
-    sample.clRStick[1] = SwitchStickAxis(right.y);
-    sample.clLStickRaw[0] = SwitchStickRaw(left.x, false);
-    sample.clLStickRaw[1] = SwitchStickRaw(left.y, false);
-    sample.clRStickRaw[0] = SwitchStickRaw(right.x, false);
-    sample.clRStickRaw[1] = SwitchStickRaw(right.y, false);
-    sample.clTriggerL = SwitchTrigger(buttons, HidNpadButton_L);
-    sample.clTriggerR = SwitchTrigger(buttons, HidNpadButton_R);
+    const int16_t* axes = pad.axes;
+    sample.clLStick[0] = SwitchStickAxis(axes[dol::input::AxisLeftX]);
+    sample.clLStick[1] = SwitchStickAxis(axes[dol::input::AxisLeftY]);
+    sample.clRStick[0] = SwitchStickAxis(axes[dol::input::AxisRightX]);
+    sample.clRStick[1] = SwitchStickAxis(axes[dol::input::AxisRightY]);
+    sample.clLStickRaw[0] = SwitchStickRaw(axes[dol::input::AxisLeftX], false);
+    sample.clLStickRaw[1] = SwitchStickRaw(axes[dol::input::AxisLeftY], false);
+    sample.clRStickRaw[0] = SwitchStickRaw(axes[dol::input::AxisRightX], false);
+    sample.clRStickRaw[1] = SwitchStickRaw(axes[dol::input::AxisRightY], false);
+    sample.clTriggerL = SwitchTrigger(buttons, dol::input::ButtonL);
+    sample.clTriggerR = SwitchTrigger(buttons, dol::input::ButtonR);
     return true;
 #else
     AuroraGamepad* gamepad = aurora_gamepad_for_player(static_cast<int>(chan));
@@ -892,7 +863,7 @@ bool ReadAccelDebug(uint32_t chan, float sdlG[3], float kpadAcc[3]) {
         return false;
     }
 #if defined(__SWITCH__)
-    // No motion-control emulation on Switch yet (see EnsureSwitchPad); the
+    // No motion-control emulation on Switch yet (native_input.h has the sensors); the
     // overlay's accelerometer readout has nothing to show.
     (void)sdlG;
     (void)kpadAcc;
