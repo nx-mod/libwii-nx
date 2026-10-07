@@ -3,6 +3,7 @@
 // Shared state and helpers live in nand_internal.h.
 
 #include "nand_internal.h"
+#include "guest_globals.h"
 #include <cerrno>
 #include <atomic>
 #if defined(__SWITCH__)
@@ -57,11 +58,17 @@ extern "C" int32_t NANDInit_HLE(void) {
     // Initialize ISFS
     ISFS_OpenLib_Initialize(&GetPersistentCpuContext());
 
-    // NANDHomeDir is at 0x80346D20 (from ESP_GetDataDir output)
-    WriteGuestNandPath(0x80346D20, CurrentNandDataDir());
-
-    // Mark NAND as initialized (0x80386848 = 2)
-    Memory::Write32(0x80386848, 2);
+    // The guest's own NAND state, where the game's globals.json says it is
+    // (another game's addresses would land on something else): its home and
+    // current directories, and the library marked initialised, which every
+    // NAND call left to the guest checks first (NAND_RESULT_FATAL_ERROR if not).
+    const std::string dataDir = CurrentNandDataDir();
+    if (const uint32_t homeDir = RuntimeGuestGlobals::find("nand.s_homeDir"))
+        WriteGuestNandPath(homeDir, dataDir);
+    if (const uint32_t currentDir = RuntimeGuestGlobals::find("nand.s_currentDir"))
+        WriteGuestNandPath(currentDir, dataDir);
+    if (const uint32_t libState = RuntimeGuestGlobals::find("nand.s_libState"))
+        Memory::Write32(libState, 2);
 
     return NAND_RESULT_OK;
 }
