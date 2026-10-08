@@ -90,6 +90,7 @@ static constexpr uint32_t ES_IOCTL_GETSTOREDTMD = 0x35;
 // The Wii Menu claims its own uid before its NAND work, and asks whether the
 // console is Korean.
 static constexpr uint32_t ES_IOCTL_SETUID = 0x21;
+static constexpr uint32_t ES_IOCTL_GETCONSUMPTION = 0x16;
 static constexpr uint32_t ES_IOCTL_CHECKKOREAREGION = 0x45;
 static constexpr int32_t ES_ENOENT = -106;
 static constexpr int32_t ES_EINVAL = -1017;
@@ -1962,6 +1963,20 @@ static int32_t NandIosIoctlv(
                     !WriteGuestBytes(certOut.address, certOut.size, cert.data(), cert.size())) {
                     return ISFS_EINVAL;
                 }
+                return ISFS_OK;
+            }
+
+            case ES_IOCTL_GETCONSUMPTION: {
+                // (title id in; the ticket's consumption limits out, then their
+                // count) - a title bought outright has none, as Dolphin answers.
+                if (numIn != 1 || numOut != 2) {
+                    return ISFS_EINVAL;
+                }
+                const IosVector count = ReadIosVector(vectorPtr, 2);
+                if (count.size < 4 || !Memory::Contains(count.address, 4)) {
+                    return ISFS_EINVAL;
+                }
+                Memory::Write32(count.address, 0);
                 return ISFS_OK;
             }
 

@@ -182,10 +182,34 @@ bool NandRemove(const std::filesystem::path& path) {
     return std::filesystem::remove(path, ec) && !ec;
 }
 
+// ISFS_Rename, on a host filesystem: IOS replaces a destination file, and the
+// Switch's FAT cannot rename over one, so the destination goes first; where the
+// rename still fails (FAT, across folders, or a file another handle has open) the
+// bytes are copied and the source removed. The Wii Menu saves iplsave.bin by
+// writing it under /tmp and renaming it into place - failing that left it with
+// nothing to load.
 bool NandRename(const std::filesystem::path& from, const std::filesystem::path& to) {
     std::error_code ec;
     std::filesystem::rename(from, to, ec);
-    return !ec;
+    if (!ec) {
+        return true;
+    }
+    const std::string first = ec.message();
+    if (PathExists(to) && !IsDirectory(to) && !IsDirectory(from)) {
+        NandRemove(to);
+        ec.clear();
+        std::filesystem::rename(from, to, ec);
+        if (!ec) {
+            return true;
+        }
+    }
+    if (!IsDirectory(from) && NandCopyFileBytes(from, to)) {
+        NandRemove(from);
+        return true;
+    }
+    LogNandError("NandRename", "'%s' -> '%s' failed: %s%s", from.string().c_str(), to.string().c_str(),
+                 first.c_str(), IsHostPathOpen(from) ? " (the source is still open)" : "");
+    return false;
 }
 
 // Guest paths are absolute and already lexically resolved against the NAND root, so
