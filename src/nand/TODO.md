@@ -19,3 +19,21 @@ Next:
       was given: kept in `.wiinx_metadata` beside the NAND, since a host
       filesystem has nowhere for a Wii uid, gid or its three modes
 - [ ] `ES_Launch`, which is how the System Menu starts a channel
+
+Found bringing up the Wii Menu (2026-10-08):
+- [ ] `NANDSetStatus` on `setting.txt` fails with -8 (NAND_RESULT_INVALID): the
+      menu logs "Failed to set product info file permission!". ISFS `SetAttr`
+      itself is implemented, so the refusal is earlier, in the SDK's own
+      `NANDSetStatus` path or in what our `NANDGetStatus` handed it
+- [ ] `NANDCreateDir("/shared2/test2")` fails: the menu's own write test of
+      `/shared2` ("Failed to create dir")
+- [ ] Shadow writes on FAT: a closed file replaces the original
+      non-atomically, because a FAT rename cannot overwrite (logged on every
+      `NANDClose` of `state.dat` and `cache.dat`)
+- [ ] `*.nandsafe.tmp` scratch files left behind after a crash
+      (`play_rec.dat.nandsafe.tmp`, `cache.dat.nandsafe.tmp`); they are
+      discarded on the next open, but nothing cleans up the rest
+- [x] NANDOpen, NANDCreate, NANDCreateDir, NANDGetStatus, NANDGetType and
+      NANDMove bound at the public functions, not the SDK helpers in front of
+      them (libdol-nx `wiinx-scan`/`wiinx-sign-natives`): the helpers take other
+      arguments, so NANDOpen returned 0 for the file descriptor
