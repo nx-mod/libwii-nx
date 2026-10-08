@@ -872,7 +872,7 @@ static void CountNandUsage(const std::filesystem::path& directory,
     }
 }
 
-extern "C" int32_t NAND_IOS_Ioctl_HLE(
+static int32_t NandIosIoctl(
     uint32_t fd,
     uint32_t cmd,
     uint32_t inBufPtr, uint32_t inLen,
@@ -1196,6 +1196,46 @@ static bool TryDeferredNetworkIosSync(CpuContext* ctx, StartSync&& startSync) {
     return false;
 }
 
+
+static int32_t NandIosIoctlv(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut, uint32_t vectorPtr);
+
+// What /dev/fs and /dev/es refused, from every caller (the synchronous entry
+// points and ios.cpp's asynchronous ones): the first place to look when a title
+// decides its system files are damaged. A path in the request is named.
+static std::string IoctlPathHint(uint32_t buf, uint32_t len) {
+    for (const uint32_t at : {0u, 6u}) {
+        if (buf == 0 || len < at + 2 || !Memory::Contains(buf + at, 2)) continue;
+        const std::string text = ReadGuestCString(buf + at, 64);
+        if (!text.empty() && text[0] == '/') return text;
+    }
+    return {};
+}
+
+extern "C" int32_t NAND_IOS_Ioctl_HLE(uint32_t fd, uint32_t cmd, uint32_t inBufPtr, uint32_t inLen,
+                                      uint32_t outBufPtr, uint32_t outLen) {
+    const int32_t result = NandIosIoctl(fd, cmd, inBufPtr, inLen, outBufPtr, outLen);
+    if (result < 0 && (fd == static_cast<uint32_t>(ISFS_DEV_FD) || fd == static_cast<uint32_t>(ES_DEV_FD))) {
+        LogNandWarning(fd == static_cast<uint32_t>(ES_DEV_FD) ? "ES" : "ISFS", "ioctl cmd=0x%02X failed: %d %s", cmd,
+                       result, IoctlPathHint(inBufPtr, inLen).c_str());
+    }
+    return result;
+}
+
+extern "C" int32_t NAND_IOS_Ioctlv_HLE(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut,
+                                       uint32_t vectorPtr) {
+    const int32_t result = NandIosIoctlv(fd, cmd, numIn, numOut, vectorPtr);
+    if (result < 0 && (fd == static_cast<uint32_t>(ISFS_DEV_FD) || fd == static_cast<uint32_t>(ES_DEV_FD)) &&
+        !(fd == static_cast<uint32_t>(ES_DEV_FD) && cmd == ES_IOCTL_CHECKKOREAREGION && result == ES_EINVAL)) {
+        std::string hint;
+        if (numIn > 0 && vectorPtr != 0 && Memory::Contains(vectorPtr, 8)) {
+            hint = IoctlPathHint(Memory::Read32(vectorPtr), Memory::Read32(vectorPtr + 4));
+        }
+        LogNandWarning(fd == static_cast<uint32_t>(ES_DEV_FD) ? "ES" : "ISFS", "ioctlv cmd=0x%02X (in=%u out=%u) failed: %d %s",
+                       cmd, numIn, numOut, result, hint.c_str());
+    }
+    return result;
+}
+
 extern "C" void NAND_IOS_Ioctl_Entry_HLE(CpuContext* ctx) {
     const uint32_t fd = ctx->gpr[3];
     const uint32_t cmd = ctx->gpr[4];
@@ -1480,7 +1520,7 @@ static int32_t HandleIsfsReadDir(uint32_t numIn, uint32_t numOut, uint32_t vecto
     return ISFS_OK;
 }
 
-extern "C" int32_t NAND_IOS_Ioctlv_HLE(
+static int32_t NandIosIoctlv(
     uint32_t fd,
     uint32_t cmd,
     uint32_t numIn,
@@ -1957,13 +1997,6 @@ extern "C" void NAND_IOS_Ioctlv_Entry_HLE(CpuContext* ctx) {
         }
     }
 
-    const int32_t result = NAND_IOS_Ioctlv_HLE(fd, cmd, numIn, numOut, vectorPtr);
-    if (fd == static_cast<uint32_t>(ES_DEV_FD) && result < 0 &&
-        !(cmd == ES_IOCTL_CHECKKOREAREGION && result == ES_EINVAL)) {
-        // what a title asked ES that we refused: the first place to look when a
-        // title decides its system files are damaged
-        LogNandWarning("ES", "cmd=0x%02X (in=%u out=%u) failed: %d", cmd, numIn, numOut, result);
-    }
-    ctx->gpr[3] = static_cast<uint32_t>(result);
+    ctx->gpr[3] = static_cast<uint32_t>(NAND_IOS_Ioctlv_HLE(fd, cmd, numIn, numOut, vectorPtr));
 }
 PPC_NATIVE_OVERRIDE_VOID(801945E0, NAND_IOS_Ioctlv_Entry_HLE, (CpuContext* ctx), (ctx));

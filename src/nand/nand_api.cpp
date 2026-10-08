@@ -175,16 +175,12 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
     else if (mode == 2) fopenMode = "r+b";
     else if (mode == 3) fopenMode = "r+b";
     
+    // NANDOpen never creates a file, in any mode: a missing one is
+    // NAND_RESULT_NOEXISTS, and the caller creates it (NANDCreate) and fills it
+    // in. Creating it here left an empty file the caller took for a damaged one:
+    // the Wii Menu found a 0-byte iplsave.bin and called the system files
+    // corrupted, where on a console it builds a fresh one.
     FILE* file = NandFopen(hostPath, fopenMode);
-    if (!file && mode >= 2) {
-        // Try creating for write modes
-        file = NandFopen(hostPath, "w+b");
-    }
-    
-    // Create parent directories and retry
-    if (!file && CreateParentDirectories(hostPath)) {
-        file = NandFopen(hostPath, mode >= 2 ? "w+b" : "rb");
-    }
 
     if (!file) {
         if (IsFaceLibResourcePath(path) && SeedFaceLibResource(hostPath)) {
