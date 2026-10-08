@@ -18,20 +18,28 @@
 namespace {
 
 // Use the SDK's own value tables, including its unknown-region result.
-uint32_t LookupProductRegion(uint32_t table, uint32_t stride, uint32_t count,
-                             const std::string& value) {
-    for (uint32_t index = 0; index < count; ++index) {
-        const uint32_t entry = table + index * stride;
-        if (!Memory::Contains(entry, stride)) {
-            break;
-        }
-        const auto* bytes = static_cast<const uint8_t*>(Memory::GetPointer(entry, stride));
-        if (bytes[0] == 0xFF) {
-            break;
-        }
-        if (value.size() < stride - 1 &&
-            std::memcmp(bytes + 1, value.c_str(), value.size() + 1) == 0) {
-            return bytes[0];
+// The SDK's own name-to-code tables (SC's static data, the same in every game;
+// read out of Mario Kart Wii's copy). They used to be read from the guest at
+// Mario Kart Wii's addresses, which in any other title is something else: the
+// Wii Menu's web engine sits at 0x8029CEB0, the area came back as garbage, and
+// its first-time setup asked for US pages on a European console.
+struct RegionCode {
+    const char* name;
+    uint32_t code;
+};
+constexpr RegionCode kProductAreas[] = {
+    {"JPN", 0}, {"USA", 1}, {"EUR", 2}, {"AUS", 3}, {"BRA", 4}, {"TWN", 5},
+    {"ROC", 5}, {"KOR", 6}, {"HKG", 7}, {"ASI", 8}, {"LTN", 9}, {"SAF", 10},
+};
+constexpr RegionCode kProductGameRegions[] = {
+    {"JP", 0}, {"US", 1}, {"EU", 2}, {"KR", 4},  // KR: Korean SDK builds
+};
+
+template <size_t N>
+uint32_t LookupProductRegion(const RegionCode (&table)[N], const std::string& value) {
+    for (const RegionCode& entry : table) {
+        if (value == entry.name) {
+            return entry.code;
         }
     }
     return 0xFFFFFFFFu;
@@ -77,15 +85,16 @@ PPC_NATIVE_OVERRIDE(801B1CAC, SCGetEuRgb60Mode_HLE, uint32_t, (), ());
 
 extern "C" uint32_t SCGetProductArea_HLE()
 {
-    return LookupProductRegion(0x8029CEB0u, 5, 13,
-                               RuntimeConsoleIdentity::Current().area);
+    return LookupProductRegion(kProductAreas, RuntimeConsoleIdentity::Current().area);
 }
 
 PPC_NATIVE_OVERRIDE(801B23A0, SCGetProductArea_HLE, uint32_t, (), ());
 
 extern "C" uint32_t SCGetProductCode_HLE()
 {
-    // Original PAL SC storage for the six-byte CODE value.
+    // Original PAL SC storage for the six-byte CODE value. TODO: this is Mario
+    // Kart Wii's address; only MKWii binds this native today. Another title
+    // binding it needs the address from its globals.json instead.
     constexpr uint32_t kProductCodeAddress = 0x803869E0u;
     const std::string& productCode = RuntimeConsoleIdentity::Current().productCode;
     const size_t size = productCode.size() + 1;
@@ -111,8 +120,7 @@ PPC_NATIVE_OVERRIDE(801B2460, SCGetProductSN_HLE, uint32_t, (uint32_t serialAddr
 
 extern "C" uint32_t SCGetProductGameRegion_HLE()
 {
-    return LookupProductRegion(0x8029CEF8u, 4, 4,
-                               RuntimeConsoleIdentity::Current().gameRegion);
+    return LookupProductRegion(kProductGameRegions, RuntimeConsoleIdentity::Current().gameRegion);
 }
 
 PPC_NATIVE_OVERRIDE(801B24C8, SCGetProductGameRegion_HLE, uint32_t, (), ());
