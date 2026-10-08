@@ -86,6 +86,10 @@ static constexpr uint32_t ES_IOCTL_GETSTOREDCONTENTCNT = 0x32;
 static constexpr uint32_t ES_IOCTL_GETSTOREDCONTENTS = 0x33;
 static constexpr uint32_t ES_IOCTL_GETSTOREDTMDSIZE = 0x34;
 static constexpr uint32_t ES_IOCTL_GETSTOREDTMD = 0x35;
+// The Wii Menu claims its own uid before its NAND work, and asks whether the
+// console is Korean.
+static constexpr uint32_t ES_IOCTL_SETUID = 0x21;
+static constexpr uint32_t ES_IOCTL_CHECKKOREAREGION = 0x45;
 static constexpr int32_t ES_ENOENT = -106;
 static constexpr int32_t ES_EINVAL = -1017;
 static constexpr uint32_t DOLPHIN_IOCTL_GET_ELAPSED_TIME = 0x01;
@@ -1917,6 +1921,16 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
                 return ISFS_OK;
             }
 
+            case ES_IOCTL_SETUID:
+                // (title id in) - the process takes that title's uid. There is
+                // one process here and NAND permissions are not enforced by uid,
+                // so there is nothing to change; IOS answers 0.
+                return ISFS_OK;
+
+            case ES_IOCTL_CHECKKOREAREGION:
+                // ES_EINVAL is "not a Korean console", as Dolphin answers it.
+                return ES_EINVAL;
+
             default:
                 LogNandWarning("IOS_Ioctlv", "unsupported /dev/es cmd=%u", cmd);
                 return ISFS_EINVAL;
@@ -1943,7 +1957,13 @@ extern "C" void NAND_IOS_Ioctlv_Entry_HLE(CpuContext* ctx) {
         }
     }
 
-    ctx->gpr[3] = static_cast<uint32_t>(
-        NAND_IOS_Ioctlv_HLE(fd, cmd, numIn, numOut, vectorPtr));
+    const int32_t result = NAND_IOS_Ioctlv_HLE(fd, cmd, numIn, numOut, vectorPtr);
+    if (fd == static_cast<uint32_t>(ES_DEV_FD) && result < 0 &&
+        !(cmd == ES_IOCTL_CHECKKOREAREGION && result == ES_EINVAL)) {
+        // what a title asked ES that we refused: the first place to look when a
+        // title decides its system files are damaged
+        LogNandWarning("ES", "cmd=0x%02X (in=%u out=%u) failed: %d", cmd, numIn, numOut, result);
+    }
+    ctx->gpr[3] = static_cast<uint32_t>(result);
 }
 PPC_NATIVE_OVERRIDE_VOID(801945E0, NAND_IOS_Ioctlv_Entry_HLE, (CpuContext* ctx), (ctx));
