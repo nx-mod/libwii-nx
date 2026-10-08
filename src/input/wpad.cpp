@@ -204,3 +204,105 @@ extern "C" uint32_t WPADSetSyncDeviceCallback_HLE(uint32_t callback)
     return previous;
 }
 PPC_NATIVE_OVERRIDE(801BF640, WPADSetSyncDeviceCallback_HLE, uint32_t, (uint32_t callback), (callback));
+
+// ----------------------------------------------------------------------------
+// The callbacks WPAD reports a remote through. A game registers them and then
+// waits: the Wii Menu decides a remote is there only when its connect callback
+// says so, and reads it no sooner. Nothing on the Switch raises the Bluetooth
+// events they hang off, so they are delivered from the vblank (VI_HLE's retrace
+// hook, the guest context the hardware's own interrupt would use): connect when
+// a channel's controller appears or goes, extension when what is plugged into it
+// changes. (Sampling: see DeliverWpadCallbacks.)
+// ----------------------------------------------------------------------------
+namespace {
+
+constexpr uint32_t kChannels = 4;
+constexpr int32_t kWpadErrNoController = -1;
+// WPAD_DEV_*: the Switch's controllers arrive as a remote with a Classic
+// Controller (wii_remote_input.cpp), a Nunchuk when that is what is held.
+constexpr int32_t kDevCore = 0, kDevFreestyle = 1, kDevClassic = 2;
+
+struct WpadCallbacks {
+    uint32_t sampling = 0, connect = 0, extension = 0;
+    bool announced = false;   // the connect callback has been told "there"
+    int32_t device = -1;      // what the extension callback was last told
+};
+WpadCallbacks g_callbacks[kChannels];
+
+uint32_t Exchange(uint32_t& slot, uint32_t callback) {
+    const uint32_t previous = slot;
+    slot = callback;
+    return previous;
+}
+
+void CallGuest(CpuContext* cpu, uint32_t callback, uint32_t chan, int32_t arg) {
+    if (callback == 0 || !TranslatedFunctionRegistry::FindByAddressPtr(callback)) {
+        return;
+    }
+    const uint32_t r3 = cpu->gpr[3], r4 = cpu->gpr[4];
+    cpu->gpr[3] = chan;
+    cpu->gpr[4] = static_cast<uint32_t>(arg);
+    InvokeIndirectCpu(callback, cpu);
+    cpu->gpr[3] = r3;
+    cpu->gpr[4] = r4;
+}
+
+void DeliverWpadCallbacks(CpuContext* cpu) {
+    for (uint32_t chan = 0; chan < kChannels; ++chan) {
+        WpadCallbacks& cb = g_callbacks[chan];
+        WiiRemoteInput::KpadSample sample;
+        const bool present = WiiRemoteInput::ReadKpadSample(chan, sample);
+        if (cb.connect != 0 && present != cb.announced) {
+            cb.announced = present;
+            CallGuest(cpu, cb.connect, chan, present ? kStatusOk : kWpadErrNoController);
+        }
+        if (!present) {
+            cb.device = -1;
+            continue;
+        }
+        const int32_t device = sample.hasClassic ? kDevClassic : sample.hasNunchuk ? kDevFreestyle : kDevCore;
+        if (cb.extension != 0 && device != cb.device) {
+            cb.device = device;
+            CallGuest(cpu, cb.extension, chan, device);
+        }
+        // (The sampling callback is kept but not called: the one games register
+        // is KPAD's own, which reads WPAD's Bluetooth state - and KPADRead is
+        // native here, so nothing waits on it.)
+    }
+}
+
+const bool g_wpadRetraceHook = [] {
+    VI_HLE_AddRetraceHook(DeliverWpadCallbacks);
+    return true;
+}();
+
+} // namespace
+
+// WPADSetSamplingCallback / WPADSetConnectCallback / WPADSetExtensionCallback:
+// (chan, callback) -> the callback replaced, as the SDK's.
+extern "C" uint32_t WPADSetSamplingCallback_HLE(uint32_t chan, uint32_t callback)
+{
+    return chan < kChannels ? Exchange(g_callbacks[chan].sampling, callback) : 0;
+}
+PPC_NATIVE_OVERRIDE(801C0A1C, WPADSetSamplingCallback_HLE, uint32_t, (uint32_t chan, uint32_t callback), (chan, callback));
+
+extern "C" uint32_t WPADSetConnectCallback_HLE(uint32_t chan, uint32_t callback)
+{
+    if (chan >= kChannels) {
+        return 0;
+    }
+    // A new callback has not been told anything yet: the next vblank says so.
+    g_callbacks[chan].announced = false;
+    return Exchange(g_callbacks[chan].connect, callback);
+}
+PPC_NATIVE_OVERRIDE(801C0A84, WPADSetConnectCallback_HLE, uint32_t, (uint32_t chan, uint32_t callback), (chan, callback));
+
+extern "C" uint32_t WPADSetExtensionCallback_HLE(uint32_t chan, uint32_t callback)
+{
+    if (chan >= kChannels) {
+        return 0;
+    }
+    g_callbacks[chan].device = -1;
+    return Exchange(g_callbacks[chan].extension, callback);
+}
+PPC_NATIVE_OVERRIDE(801C0AEC, WPADSetExtensionCallback_HLE, uint32_t, (uint32_t chan, uint32_t callback), (chan, callback));

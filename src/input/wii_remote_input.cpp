@@ -744,6 +744,25 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
     cl(dol::input::ButtonDpadLeft, kClLeft);
     cl(dol::input::ButtonDpadRight, kClRight);
 
+    // The same buttons as the remote's own, for software that reads the Wii
+    // Remote and not an extension - the Wii Menu among it, which never looks at
+    // a Classic Controller. A game that reads the Classic Controller sees the
+    // bits above; one that reads the remote sees these.
+    const auto core = [&](uint32_t button, uint32_t bit) {
+        if (buttons & button) sample.hold |= bit;
+    };
+    core(dol::input::ButtonEast, kWpadA);
+    core(dol::input::ButtonSouth, kWpadB);
+    core(dol::input::ButtonZR, kWpadB);
+    core(dol::input::ButtonNorth, kWpadOne);
+    core(dol::input::ButtonWest, kWpadTwo);
+    core(dol::input::ButtonPlus, kWpadPlus);
+    core(dol::input::ButtonMinus, kWpadMinus);
+    core(dol::input::ButtonDpadUp, kWpadUp);
+    core(dol::input::ButtonDpadDown, kWpadDown);
+    core(dol::input::ButtonDpadLeft, kWpadLeft);
+    core(dol::input::ButtonDpadRight, kWpadRight);
+
     const int16_t* axes = pad.axes;
     sample.clLStick[0] = SwitchStickAxis(axes[dol::input::AxisLeftX]);
     sample.clLStick[1] = SwitchStickAxis(axes[dol::input::AxisLeftY]);
