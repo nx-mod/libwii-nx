@@ -170,13 +170,23 @@ std::string HostPathText(const std::filesystem::path& path) {
     return RuntimeConfigFile::PathToUtf8(path);
 }
 
+// A NAND file on the host, buffered in 64 KiB: a title writes in small pieces
+// (the Wii Menu builds its 20 MB message board database a few hundred bytes at
+// a time), and on the Switch every write that reaches the SD card is a request
+// to the filesystem service. Writes are not flushed one by one - stdio does it
+// on a seek, a full buffer and a close, and NANDSafeClose flushes before it
+// commits - so the data is on the card by the time anything else looks.
 FILE* NandFopen(const std::filesystem::path& path, const char* mode) {
 #ifdef _WIN32
     const std::wstring wideMode(mode, mode + std::strlen(mode));
-    return _wfopen(path.c_str(), wideMode.c_str());
+    FILE* file = _wfopen(path.c_str(), wideMode.c_str());
 #else
-    return std::fopen(path.c_str(), mode);
+    FILE* file = std::fopen(path.c_str(), mode);
 #endif
+    if (file != nullptr) {
+        std::setvbuf(file, nullptr, _IOFBF, 64 * 1024);
+    }
+    return file;
 }
 
 bool NandRemove(const std::filesystem::path& path) {

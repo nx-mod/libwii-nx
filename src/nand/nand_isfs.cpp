@@ -796,8 +796,8 @@ extern "C" int32_t NAND_IOS_Write_HLE(uint32_t fd, uint32_t bufferPtr, uint32_t 
         return ISFS_ENOSPC;
     }
     
+    // (no flush per write: see NandFopen)
     size_t bytesWritten = std::fwrite(buffer, 1, length, handle->file);
-    std::fflush(handle->file);
     handle->position += static_cast<uint32_t>(bytesWritten);
     
     return static_cast<int32_t>(bytesWritten);

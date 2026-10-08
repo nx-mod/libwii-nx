@@ -307,8 +307,8 @@ extern "C" int32_t NANDWrite_HLE(uint32_t fileInfoPtr, uint32_t bufferPtr, uint3
         }
     }
 #endif
+    // (no flush per write: see NandFopen)
     size_t bytesWritten = std::fwrite(buffer, 1, length, handle->file);
-    std::fflush(handle->file);
     return static_cast<int32_t>(bytesWritten);
 }
 PPC_NATIVE_OVERRIDE(8019B884, NANDWrite_HLE, int32_t, (uint32_t fileInfoPtr, uint32_t bufferPtr, uint32_t length), (fileInfoPtr, bufferPtr, length));
