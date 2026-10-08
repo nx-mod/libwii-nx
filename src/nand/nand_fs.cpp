@@ -1,6 +1,8 @@
 // NAND/ISFS HLE: redirects Wii NAND paths (e.g. /title/00010004/524d4350/data/rksys.dat) to
 // <nand_root>\title\00010004\524d4350\data\rksys.dat on the host.
 
+#include <mutex>
+#include <chrono>
 #include "generated/RuntimeConfig.h"
 #include "nand_internal.h"
 
@@ -596,22 +598,45 @@ void NandSetMetadata(const std::string& wiiPath, const NandMetadata& meta) {
 // that would not fit rather than growing, and a title that is never refused
 // writes until the host disk complains instead - a failure it has no error code
 // for and no reason to expect.
+// Whether the NAND has room for `bytes` more, against a console's geometry.
+// Counting means walking every file in the NAND, which on the Switch's SD card
+// takes seconds - and IOS_Write asks before every write: the Wii Menu, writing
+// its message board database in small pieces, spent minutes here and looked
+// hung. So the walk is done at most every ten seconds and each write added to
+// it in between (an overwrite is counted again until the next walk: a NAND
+// reported a little fuller than it is, never emptier).
 bool NandHasRoomFor(uint64_t bytes) {
     constexpr uint64_t kClusterBytes = 16384;
     constexpr uint64_t kUsableClusters = 0x7ec0 - 0x300;
-    std::error_code ec;
-    uint64_t used = 0;
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(
-             RuntimeNandPath::ResolveNandRootPath(), ec)) {
-        if (ec) break;
-        std::error_code entryEc;
-        if (entry.is_regular_file(entryEc)) {
-            const uint64_t size = static_cast<uint64_t>(entry.file_size(entryEc));
-            if (!entryEc) used += (size + kClusterBytes - 1) / kClusterBytes;
+    constexpr auto kRescan = std::chrono::seconds(10);
+    static std::mutex mutex;
+    static uint64_t used = 0;
+    static std::chrono::steady_clock::time_point scanned{};
+    static bool valid = false;
+
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto now = std::chrono::steady_clock::now();
+    if (!valid || now - scanned > kRescan) {
+        used = 0;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(
+                 RuntimeNandPath::ResolveNandRootPath(), ec)) {
+            if (ec) break;
+            std::error_code entryEc;
+            if (entry.is_regular_file(entryEc)) {
+                const uint64_t size = static_cast<uint64_t>(entry.file_size(entryEc));
+                if (!entryEc) used += (size + kClusterBytes - 1) / kClusterBytes;
+            }
         }
+        scanned = now;
+        valid = true;
     }
     const uint64_t wanted = (bytes + kClusterBytes - 1) / kClusterBytes;
-    return used + wanted <= kUsableClusters;
+    if (used + wanted > kUsableClusters) {
+        return false;
+    }
+    used += wanted;
+    return true;
 }
 
 // The last component of a path, which is the name being created.
