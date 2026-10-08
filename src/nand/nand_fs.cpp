@@ -612,22 +612,26 @@ void NandSetMetadata(const std::string& wiiPath, const NandMetadata& meta) {
 // Counting means walking every file in the NAND, which on the Switch's SD card
 // takes seconds - and IOS_Write asks before every write: the Wii Menu, writing
 // its message board database in small pieces, spent minutes here and looked
-// hung. So the walk is done at most every ten seconds and each write added to
-// it in between (an overwrite is counted again until the next walk: a NAND
-// reported a little fuller than it is, never emptier).
+// hung. So the walk is done at most every ten seconds, and the bytes written in
+// between are added to it - as bytes: counting each write as whole clusters
+// made a 20 MB file written a few hundred bytes at a time look like 600 MB, and
+// the Wii Menu was told the NAND was full (NAND_RESULT_MAXBLOCKS) creating it.
+// An overwrite is still counted until the next walk: a NAND reported a little
+// fuller than it is, never emptier.
 bool NandHasRoomFor(uint64_t bytes) {
     constexpr uint64_t kClusterBytes = 16384;
     constexpr uint64_t kUsableClusters = 0x7ec0 - 0x300;
     constexpr auto kRescan = std::chrono::seconds(10);
     static std::mutex mutex;
-    static uint64_t used = 0;
+    static uint64_t scannedClusters = 0;
+    static uint64_t writtenSince = 0;
     static std::chrono::steady_clock::time_point scanned{};
     static bool valid = false;
 
     std::lock_guard<std::mutex> lock(mutex);
     const auto now = std::chrono::steady_clock::now();
     if (!valid || now - scanned > kRescan) {
-        used = 0;
+        scannedClusters = 0;
         std::error_code ec;
         for (const auto& entry : std::filesystem::recursive_directory_iterator(
                  RuntimeNandPath::ResolveNandRootPath(), ec)) {
@@ -635,17 +639,18 @@ bool NandHasRoomFor(uint64_t bytes) {
             std::error_code entryEc;
             if (entry.is_regular_file(entryEc)) {
                 const uint64_t size = static_cast<uint64_t>(entry.file_size(entryEc));
-                if (!entryEc) used += (size + kClusterBytes - 1) / kClusterBytes;
+                if (!entryEc) scannedClusters += (size + kClusterBytes - 1) / kClusterBytes;
             }
         }
+        writtenSince = 0;
         scanned = now;
         valid = true;
     }
-    const uint64_t wanted = (bytes + kClusterBytes - 1) / kClusterBytes;
-    if (used + wanted > kUsableClusters) {
+    const uint64_t pending = (writtenSince + bytes + kClusterBytes - 1) / kClusterBytes;
+    if (scannedClusters + pending > kUsableClusters) {
         return false;
     }
-    used += wanted;
+    writtenSince += bytes;
     return true;
 }
 
