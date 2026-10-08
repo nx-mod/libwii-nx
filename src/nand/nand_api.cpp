@@ -3,6 +3,7 @@
 // Shared state and helpers live in nand_internal.h.
 
 #include "nand_internal.h"
+#include "native_bindings.h"
 #include "guest_globals.h"
 #include <cerrno>
 #include <atomic>
@@ -55,8 +56,22 @@ static FileHandle* ResolveNandFileHandle(const char* who, uint32_t fileInfoPtr) 
 
 extern "C" int32_t NANDInit_HLE(void) {
     NandTraceCall("NANDInit", "");
-    // Initialize ISFS
-    ISFS_OpenLib_Initialize(&GetPersistentCpuContext());
+    // The ISFS library the game's own NAND code goes through: NANDInit's first
+    // act is ISFS_OpenLib (open /dev/fs, make the IPC heap). In the game the
+    // natives were written from, ISFS_OpenLib_Initialize does that natively; in
+    // any other its addresses are someone else's, so the game's own
+    // ISFS_OpenLib runs, found by wiinx-find-globals. Without it every ISFS call
+    // the guest makes answers "invalid": the Wii Menu read that as -8 and called
+    // its system files corrupted.
+    CpuContext& cpu = TryGetCpuContext() ? *TryGetCpuContext() : GetPersistentCpuContext();
+    ISFS_OpenLib_Initialize(&cpu);
+    if (!NativeBindings::IsReferenceGame()) {
+        if (const uint32_t openLib = RuntimeGuestGlobals::find("isfs.ISFS_OpenLib")) {
+            const uint32_t r3 = cpu.gpr[3];
+            InvokeIndirectCpu(openLib, &cpu);
+            cpu.gpr[3] = r3;
+        }
+    }
 
     // The guest's own NAND state, where the game's globals.json says it is
     // (another game's addresses would land on something else): its home and

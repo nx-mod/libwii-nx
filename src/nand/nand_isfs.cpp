@@ -3,6 +3,7 @@
 // Shared state and helpers live in nand_internal.h.
 
 #include "nand_internal.h"
+#include "native_bindings.h"
 
 #include "discord_presence.h"
 #include "runtime_log.h"
@@ -1304,7 +1305,10 @@ int32_t ISFS_OpenLib_Initialize(CpuContext* ctx) {
     std::snprintf(gameId, sizeof(gameId), "%08x", CurrentTitleIdLo());
     CreateDirectoryPath(GetNandBasePath() / "title" / titleId / gameId / "data");
 
-    if (!ctx) {
+    // The rest writes the ISFS library's globals at Mario Kart Wii's small-data
+    // offsets and builds its heap through Mario Kart Wii's functions: only in
+    // that game. Every other runs its own ISFS_OpenLib (NANDInit_HLE).
+    if (!ctx || !NativeBindings::IsReferenceGame()) {
         return ISFS_OK;
     }
 
