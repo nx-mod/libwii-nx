@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "hle_stubs.h"
 #include "memory.h"
 #include "wii_remote_input.h"
@@ -205,6 +206,10 @@ void WriteUnifiedStatus(uint32_t addr, const WiiRemoteInput::KpadSample* sample)
 
 } // namespace
 
+#if defined(__SWITCH__)
+void SwitchBootLogExternal(const char* text) noexcept;
+#endif
+
 // KPADRead: fills KPADStatus[0] for `chan` from the Bluetooth remote, returns the entry count.
 extern "C" int32_t KPAD__Read_HLE(uint32_t chan, uint32_t statusPtr, uint32_t count)
 {
@@ -213,6 +218,20 @@ extern "C" int32_t KPAD__Read_HLE(uint32_t chan, uint32_t statusPtr, uint32_t co
     }
     WiiRemoteInput::KpadSample sample;
     const bool have = WiiRemoteInput::ReadKpadSample(chan, sample);
+#if defined(__SWITCH__)
+    {   // whether the game reads input through here at all, and what it gets:
+        // the first read, then every 600, and every change of the held buttons
+        static uint32_t reads = 0, lastHold = 0;
+        const uint32_t hold = have ? sample.hold : 0;
+        if (reads++ % 600 == 0 || hold != lastHold) {
+            lastHold = hold;
+            char line[96];
+            std::snprintf(line, sizeof(line), "[kpad] read #%u chan=%u remote=%d hold=0x%04X", reads, chan,
+                          have ? 1 : 0, hold);
+            SwitchBootLogExternal(line);
+        }
+    }
+#endif
     try {
         return WriteStatus(chan, statusPtr, have ? &sample : nullptr);
     } catch (const Memory::AccessViolation&) {
