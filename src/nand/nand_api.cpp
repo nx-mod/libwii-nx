@@ -56,6 +56,18 @@ static FileHandle* ResolveNandFileHandle(const char* who, uint32_t fileInfoPtr) 
 
 extern "C" int32_t NANDInit_HLE(void) {
     NandTraceCall("NANDInit", "");
+    // Once, as the SDK's: NANDInit returns at once when its library is already
+    // up (s_libState 2). Games call it more than once - Mega Man 9 twice - and
+    // each run here started the game's ISFS_OpenLib again, which built a second
+    // ISFS heap over the first (both at the IPC buffer's start): two free lists
+    // over one block of memory, until one walked into a cycle and the game spun
+    // in iosAllocAligned with interrupts off.
+    static bool initialized = false;
+    const uint32_t libStateAddr = RuntimeGuestGlobals::find("nand.s_libState");
+    if (initialized || (libStateAddr != 0 && Memory::Read32(libStateAddr) == 2)) {
+        return NAND_RESULT_OK;
+    }
+    initialized = true;
     // The ISFS library the game's own NAND code goes through: NANDInit's first
     // act is ISFS_OpenLib (open /dev/fs, make the IPC heap). In the game the
     // natives were written from, ISFS_OpenLib_Initialize does that natively; in

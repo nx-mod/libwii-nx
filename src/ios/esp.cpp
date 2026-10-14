@@ -63,21 +63,12 @@ static void ReportEspArgError(bool& logged, const char* who, const char* what)
     std::fflush(stderr);
 }
 
-// 0x801671d0 -> ESP_InitLib
-// Opens /dev/es. We just pretend it succeeded.
-extern "C" int32_t ESP_InitLib_stub(void)
-{
-    return 0;
-}
-PPC_NATIVE_OVERRIDE(801671d0, ESP_InitLib_stub, int32_t, (void), ());
-
-// 0x80167224 -> ESP_CloseLib  
-// Closes /dev/es. No-op for us.
-extern "C" int32_t ESP_CloseLib_stub(void)
-{
-    return 0;
-}
-PPC_NATIVE_OVERRIDE(80167224, ESP_CloseLib_stub, int32_t, (void), ());
+// ESP_InitLib and ESP_CloseLib are the game's own: they open and close /dev/es
+// through IOS, which nand_isfs.cpp answers. They used to be stubs that returned
+// success without opening anything, so the ES library's descriptor stayed
+// negative and every ES request after it failed before reaching IOS (-1017).
+// A disc game never noticed; Mega Man 9, a WiiWare title, could not open its
+// own content and crashed in the error path.
 
 // 0x8016799c -> ESP_GetTitleId
 // Gets the 64-bit title ID. param_1 is pointer to 8 bytes.
