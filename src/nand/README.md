@@ -10,6 +10,12 @@ asynchronous forms of both, and the save data behind them.
 | `nand_api.cpp` | the SDK's own calls |
 | `nand_async.cpp` | the same, for a game that will not wait |
 
+An async call does its work at once and queues the guest's callback. With a
+callback it returns `NAND_RESULT_OK`, and the result - error or not - goes
+through the callback only, as on the console: a caller that sees an error from
+both handles it twice (RFL retried a Mii database format from both and failed
+on its own scratch file).
+
 What the bytes *mean* - settings, Miis, tickets, titles - is libdol-nx's
 `format/nand`, so a launcher can read a NAND without a console running.
 

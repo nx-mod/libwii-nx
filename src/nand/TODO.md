@@ -37,3 +37,12 @@ Found bringing up the Wii Menu (2026-10-08):
       NANDMove bound at the public functions, not the SDK helpers in front of
       them (libdol-nx `wiinx-scan`/`wiinx-sign-natives`): the helpers take other
       arguments, so NANDOpen returned 0 for the file descriptor
+
+Found bringing up the Mii Channel (2026-10-15):
+- [x] Async calls report their result through the callback only, returning
+      OK when one is queued
+- [ ] A safe open whose scratch file is still open from an earlier safe open
+      fails to seed it ("I/O error"); the console would refuse the second open
+      cleanly, or reuse the file
+- [ ] `ES_DiGetTicketView` (`/dev/es` 0x1B) is unsupported; only
+      `__InitPlayTime` has called it so far

@@ -18,7 +18,8 @@ constexpr uint32_t kKpadStatusSize = 0x84;
 
 // KPADStatus field offsets (RVL SDK).
 constexpr uint32_t kHold = 0x00, kTrig = 0x04, kRelease = 0x08, kAcc = 0x0C, kAccValue = 0x18,
-                   kAccSpeed = 0x1C, kPos = 0x20, kAccVertical = 0x54, kDevType = 0x5C, kWpadErr = 0x5D,
+                   kAccSpeed = 0x1C, kPos = 0x20, kVec = 0x28, kSpeed = 0x30, kHorizon = 0x34, kDist = 0x48,
+                   kAccVertical = 0x54, kDevType = 0x5C, kWpadErr = 0x5D,
                    kDpdValidFg = 0x5E, kDataFormat = 0x5F, kFsStick = 0x60, kFsAcc = 0x68, kFsAccValue = 0x74,
                    kFsAccSpeed = 0x78;
 // KPADStatus.ex_status.cl (KPADEXStatus, Classic Controller view).
@@ -44,6 +45,10 @@ constexpr uint8_t kFmtClassicAccDpd = 8;
 constexpr int8_t kWpadErrNone = 0;
 constexpr int8_t kWpadErrNoController = -1;
 
+// KPADStatus.dist, in metres, for the emulated pointer: a remote held about a
+// metre and a half from the sensor bar.
+constexpr float kPointerDistance = 1.5f;
+
 // Raw accelerometer as WPADStatus carries it: 10 bits, 0x200 at 0 g, 100 per g.
 constexpr float kRawAccZero = 512.0f;
 constexpr float kRawAccPerG = 100.0f;
@@ -53,6 +58,8 @@ struct ChannelState {
     uint32_t prevClHold = 0;
     float prevAcc[3] = {0.0f, -1.0f, 0.0f};
     float prevFsAcc[3] = {0.0f, -1.0f, 0.0f};
+    float prevPos[2] = {};
+    bool hadPos = false;
 };
 
 std::array<ChannelState, 4> g_channels{};
@@ -108,10 +115,30 @@ int32_t WriteStatus(uint32_t chan, uint32_t addr, const WiiRemoteInput::KpadSamp
     Memory::WriteFloat32(addr + kAccSpeed, Distance(sample->acc, state.prevAcc));
     for (int i = 0; i < 3; ++i) state.prevAcc[i] = sample->acc[i];
 
-    // No IR pointer: pos .. acc_vertical zeroed and dpd_valid_fg clear, which
-    // the game treats as "pointing away from the screen".
+    // The pointer, when there is one: pos and its motion, the remote held level
+    // (horizon, acc_vertical) at a fixed distance, and both sensor-bar marks in
+    // view. Without one, pos .. acc_vertical zeroed and dpd_valid_fg clear,
+    // which the game treats as "pointing away from the screen".
     WriteZeroFloats(addr + kPos, (kAccVertical + 8 - kPos) / 4);
-    Memory::Write8(addr + kDpdValidFg, 0);
+    if (sample->pointerValid) {
+        const float vec[2] = {state.hadPos ? sample->pointer[0] - state.prevPos[0] : 0.0f,
+                              state.hadPos ? sample->pointer[1] - state.prevPos[1] : 0.0f};
+        Memory::WriteFloat32(addr + kPos, sample->pointer[0]);
+        Memory::WriteFloat32(addr + kPos + 4, sample->pointer[1]);
+        Memory::WriteFloat32(addr + kVec, vec[0]);
+        Memory::WriteFloat32(addr + kVec + 4, vec[1]);
+        Memory::WriteFloat32(addr + kSpeed, std::sqrt(vec[0] * vec[0] + vec[1] * vec[1]));
+        Memory::WriteFloat32(addr + kHorizon, 1.0f);
+        Memory::WriteFloat32(addr + kDist, kPointerDistance);
+        Memory::WriteFloat32(addr + kAccVertical, 1.0f);
+        Memory::Write8(addr + kDpdValidFg, 2);
+        state.prevPos[0] = sample->pointer[0];
+        state.prevPos[1] = sample->pointer[1];
+        state.hadPos = true;
+    } else {
+        Memory::Write8(addr + kDpdValidFg, 0);
+        state.hadPos = false;
+    }
 
     const uint8_t devType = sample->hasClassic ? kDevClassic : sample->hasNunchuk ? kDevFreestyle : kDevCore;
     const uint8_t dataFormat =

@@ -113,6 +113,73 @@ int16_t SwitchStickRaw(s32 value, bool invert) {
     normalized = std::clamp(normalized, -1.0f, 1.0f);
     return static_cast<int16_t>(std::clamp(std::lround(normalized * 512.0f), -512L, 511L));
 }
+
+// The IR pointer, which a Switch pad does not have. The right stick moves it
+// (any player) and the touchscreen places it (player 1, handheld); touching also
+// holds A, so a tap on a button presses it. It shows up at the first use and is
+// taken off the screen after kPointerIdle without one, so a game that reads the
+// sticks and buttons alone keeps seeing a remote pointed away.
+constexpr float kPointerStickDeadzone = 0.2f;
+constexpr float kPointerSpeed = 1.6f;                        // screen half-widths a second at full tilt
+constexpr auto kPointerIdle = std::chrono::seconds(15);
+constexpr auto kTouchPressDelay = std::chrono::milliseconds(50);  // let the game see the hover first
+
+struct PointerState {
+    bool shown = false;
+    float pos[2] = {};
+    std::chrono::steady_clock::time_point lastUpdate{};
+    std::chrono::steady_clock::time_point lastActive{};
+    std::chrono::steady_clock::time_point touchStart{};
+    bool touching = false;
+};
+
+std::array<PointerState, PAD_MAX_CONTROLLERS> g_pointers{};
+
+// Moves the pointer of `chan` from its pad and the touchscreen and copies it,
+// with the A press of a touch, into the sample.
+void UpdatePointer(uint32_t chan, const dol::input::State& pad, KpadSample& sample) {
+    PointerState& pointer = g_pointers[chan];
+    const auto now = std::chrono::steady_clock::now();
+    float dt = std::chrono::duration<float>(now - pointer.lastUpdate).count();
+    pointer.lastUpdate = now;
+    dt = std::clamp(dt, 0.0f, 0.1f);  // KPADRead and GetUnifiedWpadStatus both sample: time, not calls
+
+    const float sx = SwitchStickAxis(pad.axes[dol::input::AxisRightX]);
+    const float sy = SwitchStickAxis(pad.axes[dol::input::AxisRightY]);
+    if (std::fabs(sx) > kPointerStickDeadzone || std::fabs(sy) > kPointerStickDeadzone) {
+        if (!pointer.shown) {
+            pointer.pos[0] = pointer.pos[1] = 0.0f;
+        }
+        pointer.shown = true;
+        pointer.lastActive = now;
+        pointer.pos[0] = std::clamp(pointer.pos[0] + sx * kPointerSpeed * dt, -1.0f, 1.0f);
+        pointer.pos[1] = std::clamp(pointer.pos[1] - sy * kPointerSpeed * dt, -1.0f, 1.0f);  // stick +y up, pos +y down
+    }
+
+    const dol::input::Touch& touch = dol::input::touch();
+    if (chan == 0 && touch.down) {
+        if (!pointer.touching) {
+            pointer.touching = true;
+            pointer.touchStart = now;
+        }
+        pointer.shown = true;
+        pointer.lastActive = now;
+        pointer.pos[0] = std::clamp(touch.x * 2.0f - 1.0f, -1.0f, 1.0f);
+        pointer.pos[1] = std::clamp(touch.y * 2.0f - 1.0f, -1.0f, 1.0f);
+        if (now - pointer.touchStart >= kTouchPressDelay) {
+            sample.hold |= kWpadA;
+        }
+    } else {
+        pointer.touching = false;
+    }
+
+    if (pointer.shown && now - pointer.lastActive > kPointerIdle) {
+        pointer.shown = false;
+    }
+    sample.pointerValid = pointer.shown;
+    sample.pointer[0] = pointer.pos[0];
+    sample.pointer[1] = pointer.pos[1];
+}
 #endif  // __SWITCH__
 
 // Per-port memory of the last Wii controller seen there, for EffectiveKind.
@@ -774,6 +841,7 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
     sample.clRStickRaw[1] = SwitchStickRaw(axes[dol::input::AxisRightY], false);
     sample.clTriggerL = SwitchTrigger(buttons, dol::input::ButtonL);
     sample.clTriggerR = SwitchTrigger(buttons, dol::input::ButtonR);
+    UpdatePointer(chan, pad, sample);
     return true;
 #else
     AuroraGamepad* gamepad = aurora_gamepad_for_player(static_cast<int>(chan));

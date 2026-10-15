@@ -568,17 +568,8 @@ extern "C" int32_t NANDGetType_HLE(uint32_t pathPtr, uint32_t outTypePtr) {
 }
 PPC_NATIVE_OVERRIDE(8019E770, NANDGetType_HLE, int32_t, (uint32_t pathPtr, uint32_t outTypePtr), (pathPtr, outTypePtr));
 
-// ============================================================================
-// contentFastOpenNAND/contentReadNAND/contentCloseNAND: NAND-installed content (WADs) never
-// exists here, everything comes from the DVD image, so refusing is the correct SDK answer.
-// ============================================================================
-
-extern "C" int32_t contentFastOpenNAND_HLE(uint32_t contentId, uint32_t outHandlePtr) {
-    return ISFS_ENOENT;
-}
-PPC_NATIVE_OVERRIDE(8015BC80, contentFastOpenNAND_HLE, int32_t, (uint32_t contentId, uint32_t outHandlePtr), (contentId, outHandlePtr));
-
-extern "C" int32_t contentReadNAND_HLE(uint32_t handlePtr, uint32_t buffer, uint32_t length, uint32_t outReadPtr) {
-    return ISFS_EINVAL;
-}
-PPC_NATIVE_OVERRIDE(8015BCF8, contentReadNAND_HLE, int32_t, (uint32_t handlePtr, uint32_t buffer, uint32_t length, uint32_t outReadPtr), (handlePtr, buffer, length, outReadPtr));
+// contentFastOpenNAND/contentReadNAND (CNT) are the title's own: they reach its
+// contents through ES, which nand_isfs.cpp answers from the NAND. They used to
+// refuse, on the idea that everything comes from a disc; the Mii Channel reads
+// its archives this way and said its system files were corrupted. A disc game
+// asking gets "not in the NAND" from ES, as it did from the refusal.

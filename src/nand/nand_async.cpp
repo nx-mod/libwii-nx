@@ -114,22 +114,35 @@ bool NandProcessPendingCallbacks(CpuContext* cpu, int maxToProcess) {
 // `params`'s last two args must stay named callbackPtr/commandBlockPtr since the macro bodies
 // reference them directly. PPC_NATIVE_OVERRIDE calls stay written out verbatim, not macro-generated,
 // because the C# translator regex-scans this file as raw text to decide which addresses to leave untranslated.
+//
+// With a callback, the call itself only reports that the request was queued (NAND_RESULT_OK),
+// as on the console: the result, error or not, reaches the guest through the callback alone.
+// Returning an error here as well made the caller handle it twice - RFL then retried from both
+// paths, so its Mii database format created and safe-opened the file twice, the second safe
+// open failed on the first one's scratch file, and the database was left empty.
 
-// Returns the synchronous result verbatim.
+// Without a callback, returns the synchronous result verbatim.
 #define NAND_ASYNC_FWD_BODY(Name, Sync, params, sync_args)        \
     extern "C" int32_t Name params {                              \
         int32_t result = Sync sync_args;                          \
+        if (callbackPtr == 0) {                                   \
+            return result;                                        \
+        }                                                         \
         InvokeNandCallback(callbackPtr, result, commandBlockPtr); \
-        return result;                                            \
+        return NAND_RESULT_OK;                                    \
     }
 
-// Reports only success or failure: the transferred count travels to the guest
-// through the callback, so a non-negative result collapses to NAND_RESULT_OK.
+// Without a callback, reports only success or failure: the transferred count
+// travels to the guest through the callback, so a non-negative result
+// collapses to NAND_RESULT_OK.
 #define NAND_ASYNC_FWD_BODY_OKZERO(Name, Sync, params, sync_args) \
     extern "C" int32_t Name params {                              \
         int32_t result = Sync sync_args;                          \
+        if (callbackPtr == 0) {                                   \
+            return (result < 0) ? result : NAND_RESULT_OK;        \
+        }                                                         \
         InvokeNandCallback(callbackPtr, result, commandBlockPtr); \
-        return (result < 0) ? result : NAND_RESULT_OK;            \
+        return NAND_RESULT_OK;                                    \
     }
 
 NAND_ASYNC_FWD_BODY(NANDOpenAsync_HLE, NANDOpen_HLE,
