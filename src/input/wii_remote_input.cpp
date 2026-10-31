@@ -4,7 +4,7 @@
 #include "runtime_log.h"
 
 #include <dolphin/pad.h>
-#include <aurora/gamepad.h>
+#include "native_gamepad.h"
 
 // Switch reads its controllers from libnx; desktop reaches Wii Remotes through
 // SDL's HIDAPI driver.
