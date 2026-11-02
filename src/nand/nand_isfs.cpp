@@ -83,6 +83,7 @@ static constexpr uint32_t ES_IOCTL_GETVIEWCNT = 0x12;        // ticket views
 static constexpr uint32_t ES_IOCTL_GETVIEWS = 0x13;
 static constexpr uint32_t ES_IOCTL_GETTMDVIEWCNT = 0x14;     // the TMD view's size
 static constexpr uint32_t ES_IOCTL_GETTMDVIEWS = 0x15;
+static constexpr uint32_t ES_IOCTL_DIGETTICKETVIEW = 0x1B;  // the view of a ticket, or of the running title's
 static constexpr uint32_t ES_IOCTL_GETSTOREDCONTENTCNT = 0x32;
 static constexpr uint32_t ES_IOCTL_GETSTOREDCONTENTS = 0x33;
 static constexpr uint32_t ES_IOCTL_GETSTOREDTMDSIZE = 0x34;
@@ -1630,6 +1631,32 @@ static int32_t NandIosIoctlv(
                     std::memcpy(Memory::GetPointer(out.address + i * kTicketViewSize, kTicketViewSize),
                                 view.data(), kTicketViewSize);
                 }
+                return ISFS_OK;
+            }
+
+            // A ticket's view: the ticket passed in, or with none the running title's own (as Dolphin's
+            // ES::DIGetTicketView). WiiWare asks for its own at boot.
+            case ES_IOCTL_DIGETTICKETVIEW: {
+                const IosVector ticketIn = ReadIosVector(vectorPtr, 0);
+                const IosVector out = ReadIosVector(vectorPtr, 1);
+                if (numIn != 1 || numOut != 1 || !IsValidGuestRange(out.address, static_cast<uint32_t>(kTicketViewSize))) {
+                    return ES_EINVAL;
+                }
+                std::vector<uint8_t> ticket;
+                if (ticketIn.size >= kTicketSize && Memory::Contains(ticketIn.address, kTicketSize)) {
+                    const uint8_t* bytes = Memory::GetPointer(ticketIn.address, kTicketSize);
+                    ticket.assign(bytes, bytes + kTicketSize);
+                } else {
+                    const std::vector<uint8_t> stored = StoredTickets(CurrentTitleId());
+                    if (stored.size() < kTicketSize) {
+                        LogNandWarning("ES", "no ticket for the running title %016llx",
+                                       static_cast<unsigned long long>(CurrentTitleId()));
+                        return ES_ENOENT;
+                    }
+                    ticket.assign(stored.begin(), stored.begin() + kTicketSize);
+                }
+                const auto view = TicketView(ticket.data());
+                std::memcpy(Memory::GetPointer(out.address, kTicketViewSize), view.data(), kTicketViewSize);
                 return ISFS_OK;
             }
 
