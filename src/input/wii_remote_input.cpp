@@ -818,17 +818,34 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
     const auto core = [&](uint32_t button, uint32_t bit) {
         if (buttons & button) sample.hold |= bit;
     };
-    core(dol::input::ButtonEast, kWpadA);
-    core(dol::input::ButtonSouth, kWpadB);
-    core(dol::input::ButtonZR, kWpadB);
-    core(dol::input::ButtonNorth, kWpadOne);
-    core(dol::input::ButtonWest, kWpadTwo);
     core(dol::input::ButtonPlus, kWpadPlus);
     core(dol::input::ButtonMinus, kWpadMinus);
-    core(dol::input::ButtonDpadUp, kWpadUp);
-    core(dol::input::ButtonDpadDown, kWpadDown);
-    core(dol::input::ButtonDpadLeft, kWpadLeft);
-    core(dol::input::ButtonDpadRight, kWpadRight);
+    core(dol::input::ButtonZR, kWpadB);
+    if (RuntimeConfigFile::WiiRemoteSideways()) {
+        // Held sideways, D-pad on the left: the remote's Up points left and its
+        // 2 and 1 sit where A and B do on a Switch pad. The D-pad and left stick
+        // turn with it (+y is up); A and B (on top and underneath) move to X and Y.
+        core(dol::input::ButtonEast, kWpadTwo);
+        core(dol::input::ButtonSouth, kWpadOne);
+        core(dol::input::ButtonNorth, kWpadA);
+        core(dol::input::ButtonWest, kWpadB);
+        const int16_t lx = pad.axes[dol::input::AxisLeftX];
+        const int16_t ly = pad.axes[dol::input::AxisLeftY];
+        constexpr int16_t kStickPress = 16384;
+        if ((buttons & dol::input::ButtonDpadUp) || ly > kStickPress) sample.hold |= kWpadRight;
+        if ((buttons & dol::input::ButtonDpadDown) || ly < -kStickPress) sample.hold |= kWpadLeft;
+        if ((buttons & dol::input::ButtonDpadLeft) || lx < -kStickPress) sample.hold |= kWpadUp;
+        if ((buttons & dol::input::ButtonDpadRight) || lx > kStickPress) sample.hold |= kWpadDown;
+    } else {
+        core(dol::input::ButtonEast, kWpadA);
+        core(dol::input::ButtonSouth, kWpadB);
+        core(dol::input::ButtonNorth, kWpadOne);
+        core(dol::input::ButtonWest, kWpadTwo);
+        core(dol::input::ButtonDpadUp, kWpadUp);
+        core(dol::input::ButtonDpadDown, kWpadDown);
+        core(dol::input::ButtonDpadLeft, kWpadLeft);
+        core(dol::input::ButtonDpadRight, kWpadRight);
+    }
 
     const int16_t* axes = pad.axes;
     sample.clLStick[0] = SwitchStickAxis(axes[dol::input::AxisLeftX]);

@@ -24,31 +24,23 @@ struct WpadStubState {
 
 WpadStubState g_state{};
 
-void InvokeWpadCallback(uint32_t callback, uint32_t chan, int32_t result)
-{
-    if (callback == 0) {
-        return;
-    }
-    if (!TranslatedFunctionRegistry::FindByAddressPtr(callback)) {
-        return;
-    }
-    auto& cpu = GetPersistentCpuContext();
-    cpu.gpr[3] = chan;
-    cpu.gpr[4] = static_cast<uint32_t>(result);
-    InvokeIndirectCpu(callback, &cpu);
-}
-
 int32_t InitializeWpadLibrary()
 {
     g_state.contract.Initialize();
     return kStatusOk;
 }
 
-// The async WPAD entry points all report their outcome to the guest callback and
-// then return the same value.
+// The async WPAD entry points report their outcome to the guest callback and
+// return the same value. The callback runs later, from the completion pump, as
+// the Bluetooth stack's would: a synchronous wrapper (WPADGetInfo) sleeps on the
+// channel's queue after the call returns, and a callback run inside the call
+// woke it before it slept, so it slept forever. The pump's callbacks take
+// (r3, r4) = (chan, result).
 int32_t CompleteWpadRequest(uint32_t chan, uint32_t callback, int32_t result)
 {
-    InvokeWpadCallback(callback, chan, result);
+    if (callback != 0) {
+        NandQueueIosCallback(callback, static_cast<int32_t>(chan), static_cast<uint32_t>(result));
+    }
     return result;
 }
 
@@ -154,8 +146,25 @@ extern "C" int32_t WPADGetInfoAsync_HLE(uint32_t chan, uint32_t infoPtr, uint32_
         return CompleteWpadRequest(chan, callback, WpadContract::kErrorBadChannel);
     }
 
-    (void)infoPtr;
-    return CompleteWpadRequest(chan, callback, WpadContract::kErrorNoController);
+    if (!WiiRemoteInput::IsRemoteChannel(chan)) {
+        return CompleteWpadRequest(chan, callback, WpadContract::kErrorNoController);
+    }
+    // WPADInfo: dpd, speaker, attach, lowBat, nearempty (BOOLs), then battery
+    // (0-4), led, protocol, firmware. A remote that is there, full, with its
+    // player's LED and the extension it has.
+    if (infoPtr != 0) {
+        const bool attached = WiiRemoteInput::EffectiveKind(chan) != WiiRemoteInput::Kind::Remote;
+        Memory::Write32(infoPtr + 0x00, 0);
+        Memory::Write32(infoPtr + 0x04, 0);
+        Memory::Write32(infoPtr + 0x08, attached ? 1u : 0u);
+        Memory::Write32(infoPtr + 0x0C, 0);
+        Memory::Write32(infoPtr + 0x10, 0);
+        Memory::Write8(infoPtr + 0x14, 4);
+        Memory::Write8(infoPtr + 0x15, static_cast<uint8_t>(1u << chan));
+        Memory::Write8(infoPtr + 0x16, 0);
+        Memory::Write8(infoPtr + 0x17, 0);
+    }
+    return CompleteWpadRequest(chan, callback, kStatusOk);
 }
 PPC_NATIVE_OVERRIDE(801C0CA4, WPADGetInfoAsync_HLE, int32_t,
          (uint32_t chan, uint32_t infoPtr, uint32_t callback), (chan, infoPtr, callback));
