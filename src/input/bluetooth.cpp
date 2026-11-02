@@ -7,6 +7,7 @@
 #include "hle_stubs.h"
 #include "abi_bridge.h"
 #include "memory.h"
+#include "guest_globals.h"
 #include "runtime_log.h"
 
 #include <chrono>
@@ -23,13 +24,16 @@ extern "C" void GKI_delay_HLE_801301b4(CpuContext* ctx)
 extern "C" uint32_t BTM_IsDeviceUp_HLE_8013a300(CpuContext* ctx)
 {
     // Force Bluetooth stack to "up" to avoid endless polling loops while we lack
-    // real hardware bring-up.
-    constexpr uint32_t kBtmCbBase = 0x80336278u;
-    constexpr uint32_t kDevStateOffset = 0x64Eu;
-    try {
-        ::Memory::Write8(kBtmCbBase + kDevStateOffset, 5u);
-    } catch (const ::Memory::AccessViolation&) {
-        // Ignore; best-effort write
+    // real hardware bring-up. The device state byte is the title's own
+    // (btm_cb.devcb.state, globals.json btm.devState, read from this function's
+    // code); a title without it gets only the answer.
+    static const uint32_t devState = RuntimeGuestGlobals::find("btm.devState");
+    if (devState != 0) {
+        try {
+            ::Memory::Write8(devState, 5u);
+        } catch (const ::Memory::AccessViolation&) {
+            // Ignore; best-effort write
+        }
     }
 
     if (ctx) {

@@ -1,4 +1,5 @@
 #include "hle_stubs.h"
+#include "guest_globals.h"
 
 #include "console_identity.h"
 #include "sc_serial_contract.h"
@@ -92,10 +93,13 @@ PPC_NATIVE_OVERRIDE(801B23A0, SCGetProductArea_HLE, uint32_t, (), ());
 
 extern "C" uint32_t SCGetProductCode_HLE()
 {
-    // Original PAL SC storage for the six-byte CODE value. TODO: this is Mario
-    // Kart Wii's address; only MKWii binds this native today. Another title
-    // binding it needs the address from its globals.json instead.
-    constexpr uint32_t kProductCodeAddress = 0x803869E0u;
+    // The title's own buffer for the six-byte CODE value (globals.json
+    // sc.productCode, read from SCGetProductCode's code). Without it, no code,
+    // as SC answers when the item is missing.
+    static const uint32_t kProductCodeAddress = RuntimeGuestGlobals::find("sc.productCode");
+    if (kProductCodeAddress == 0) {
+        return 0;
+    }
     const std::string& productCode = RuntimeConsoleIdentity::Current().productCode;
     const size_t size = productCode.size() + 1;
     if (!Memory::Contains(kProductCodeAddress, size)) {
