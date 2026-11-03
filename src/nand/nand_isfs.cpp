@@ -7,6 +7,7 @@
 
 #include "discord_presence.h"
 #include "runtime_log.h"
+#include "runtime_config.h"
 
 extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx);
 
@@ -623,7 +624,17 @@ extern "C" int32_t Sdio_HLE_Ioctl(uint32_t cmd, uint32_t in, uint32_t inLen, uin
                                   bool* held);
 extern "C" int32_t Sdio_HLE_Ioctlv(uint32_t cmd, uint32_t numIn, uint32_t numOut, uint32_t vectorPtr);
 
+static int32_t NandIosOpen(uint32_t pathPtr, uint32_t mode);
+
 extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
+    const int32_t result = NandIosOpen(pathPtr, mode);
+    if (RuntimeConfigFile::NandTraceEnabled()) {
+        LogNandWarning("trace", "IOS_Open(%s, mode %u) = %d", ReadGuestCString(pathPtr, 64).c_str(), mode, result);
+    }
+    return result;
+}
+
+static int32_t NandIosOpen(uint32_t pathPtr, uint32_t mode) {
     const std::string pathStorage = ReadGuestCString(pathPtr);
     const char* path = pathPtr == 0 ? nullptr : pathStorage.c_str();
     
@@ -1217,6 +1228,11 @@ static std::string IoctlPathHint(uint32_t buf, uint32_t len) {
 extern "C" int32_t NAND_IOS_Ioctl_HLE(uint32_t fd, uint32_t cmd, uint32_t inBufPtr, uint32_t inLen,
                                       uint32_t outBufPtr, uint32_t outLen) {
     const int32_t result = NandIosIoctl(fd, cmd, inBufPtr, inLen, outBufPtr, outLen);
+    if (RuntimeConfigFile::NandTraceEnabled() &&
+        (fd == static_cast<uint32_t>(ISFS_DEV_FD) || fd == static_cast<uint32_t>(ES_DEV_FD))) {
+        LogNandWarning("trace", "%s ioctl 0x%02X %s = %d", fd == static_cast<uint32_t>(ES_DEV_FD) ? "es" : "fs", cmd,
+                       IoctlPathHint(inBufPtr, inLen).c_str(), result);
+    }
     if (result < 0 && (fd == static_cast<uint32_t>(ISFS_DEV_FD) || fd == static_cast<uint32_t>(ES_DEV_FD))) {
         LogNandWarning(fd == static_cast<uint32_t>(ES_DEV_FD) ? "ES" : "ISFS", "ioctl cmd=0x%02X failed: %d %s", cmd,
                        result, IoctlPathHint(inBufPtr, inLen).c_str());
@@ -1227,6 +1243,29 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(uint32_t fd, uint32_t cmd, uint32_t inBufP
 extern "C" int32_t NAND_IOS_Ioctlv_HLE(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut,
                                        uint32_t vectorPtr) {
     const int32_t result = NandIosIoctlv(fd, cmd, numIn, numOut, vectorPtr);
+    if (RuntimeConfigFile::NandTraceEnabled() &&
+        (fd == static_cast<uint32_t>(ISFS_DEV_FD) || fd == static_cast<uint32_t>(ES_DEV_FD))) {
+        const std::string hint = numIn > 0 && vectorPtr != 0 && Memory::Contains(vectorPtr, 8)
+                                     ? IoctlPathHint(Memory::Read32(vectorPtr), Memory::Read32(vectorPtr + 4))
+                                     : std::string();
+        // GetUsage (0x0C) answers in its two outputs: clusters and inodes, which a title's free-space
+        // check subtracts from the NAND's user area
+        uint32_t clusters = 0, inodes = 0;
+        if (fd == static_cast<uint32_t>(ISFS_DEV_FD) && cmd == 0x0C && result >= 0 && numOut >= 2 &&
+            Memory::Contains(vectorPtr + 8 * numIn, 16)) {
+            const uint32_t first = Memory::Read32(vectorPtr + 8 * numIn);
+            const uint32_t second = Memory::Read32(vectorPtr + 8 * numIn + 8);
+            if (Memory::Contains(first, 4) && Memory::Contains(second, 4)) {
+                clusters = Memory::Read32(first);
+                inodes = Memory::Read32(second);
+            }
+        }
+        LogNandWarning("trace", "%s ioctlv 0x%02X (in=%u out=%u) %s = %d%s",
+                       fd == static_cast<uint32_t>(ES_DEV_FD) ? "es" : "fs", cmd, numIn, numOut, hint.c_str(), result,
+                       cmd == 0x0C && result >= 0
+                           ? (" (" + std::to_string(clusters) + " clusters, " + std::to_string(inodes) + " inodes)").c_str()
+                           : "");
+    }
     if (result < 0 && (fd == static_cast<uint32_t>(ISFS_DEV_FD) || fd == static_cast<uint32_t>(ES_DEV_FD)) &&
         !(fd == static_cast<uint32_t>(ES_DEV_FD) && cmd == ES_IOCTL_CHECKKOREAREGION && result == ES_EINVAL)) {
         std::string hint;
@@ -1424,7 +1463,12 @@ static int32_t HandleIsfsGetUsage(uint32_t numIn, uint32_t numOut, uint32_t vect
         return ISFS_ENOENT;
     }
 
-    uint64_t inodes = 0;
+    // The directory asked about is an inode of its own, as IOS counts it: the
+    // SDK's free-space check (NANDCheck's sibling that sums a title's home)
+    // takes one off the home directory's count for exactly that inode, so an
+    // empty home answered as 0 wrapped to 0xFFFFFFFF and left the title no
+    // inodes at all - Bomberman Blast never tried to create its save.
+    uint64_t inodes = 1;
     uint64_t clusters = 0;
     CountNandUsage(hostPath, inodes, clusters);
     NAND_APPROXIMATION("ISFS_GetUsage",

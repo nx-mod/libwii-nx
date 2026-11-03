@@ -8,7 +8,10 @@
       3 of 7
 - [x] Report usage the way a console does: `ISFS_GetUsage` counts a directory's
       inodes and whole clusters, capped at the NAND's own geometry
-      (16 KiB clusters, 0x7ec0 total less 0x300 reserved, 0x17ff inodes)
+      (16 KiB clusters, 0x7ec0 total less 0x300 reserved, 0x17ff inodes). The
+      directory asked about is an inode of its own (2026-11-02): the SDK takes
+      one off a title's home count for it, and an empty home answered as 0
+      left the title no inodes - Bomberman Blast never created its save
 - [x] Report a NAND that is *full* the way a console does, rather than failing:
       `ISFS_GetStats` reports free clusters and inodes against the real
       geometry, and `IOS_Write` refuses with `ISFS_ENOSPC` rather than letting
